@@ -2,6 +2,7 @@ PROFILER_VERSION=1.5-ea
 JATTACH_VERSION=1.5-ea
 LIB_PROFILER=libasyncProfiler.so
 JATTACH=jattach
+BINARIES=build/$(LIB_PROFILER) build/$(JATTACH)
 PROFILER_JAR=async-profiler.jar
 CC=gcc
 CFLAGS=-O2
@@ -11,6 +12,7 @@ INCLUDES=-I$(JAVA_HOME)/include
 LIBS=-ldl -lpthread
 JAVAC=$(JAVA_HOME)/bin/javac
 JAR=$(JAVA_HOME)/bin/jar
+
 
 ifeq ($(JAVA_HOME),)
   export JAVA_HOME:=$(shell java -cp . JavaHome)
@@ -28,23 +30,23 @@ else
 endif
 
 
-.PHONY: all release test clean
+.PHONY: all binaries release test clean
 
-all: build build/$(LIB_PROFILER) build/$(JATTACH) build/$(PROFILER_JAR)
+all: build/$(PROFILER_JAR)
 
-release: build async-profiler-$(RELEASE_TAG).tar.gz
+release: async-profiler-$(RELEASE_TAG).tar.gz
 
-async-profiler-$(RELEASE_TAG).tar.gz: build/$(LIB_PROFILER) build/$(JATTACH) \
-                                      build/$(PROFILER_JAR) profiler.sh LICENSE *.md
+async-profiler-$(RELEASE_TAG).tar.gz: $(BINARIES) build/$(PROFILER_JAR) profiler.sh LICENSE *.md
 	tar cvzf $@ $^
 
-build:
-	mkdir -p build
+binaries: $(BINARIES)
 
 build/$(LIB_PROFILER): src/*.cpp src/*.h
+	mkdir -p build
 	$(CPP) $(CPPFLAGS) -DPROFILER_VERSION=\"$(PROFILER_VERSION)\" $(INCLUDES) -fPIC -shared -o $@ src/*.cpp $(LIBS)
 
 build/$(JATTACH): src/jattach/jattach.c
+	mkdir -p build
 	$(CC) $(CFLAGS) -DJATTACH_VERSION=\"$(JATTACH_VERSION)\" -o $@ $^
 
 build/$(PROFILER_JAR): src/java/one/profiler/*.java
