@@ -1,9 +1,9 @@
-PROFILER_VERSION=1.5-ea
-JATTACH_VERSION=1.5-ea
+LIBRARY_VERSION=1.5-ea
 LIB_PROFILER=libasyncProfiler.so
 JATTACH=jattach
 BINARIES=build/$(LIB_PROFILER) build/$(JATTACH)
-PROFILER_JAR=async-profiler.jar
+PROFILER=async-profiler
+PROFILER_JAR=$(PROFILER).jar
 CC=gcc
 CFLAGS=-O2
 CPP=g++
@@ -13,6 +13,9 @@ LIBS=-ldl -lpthread
 JAVAC=$(JAVA_HOME)/bin/javac
 JAR=$(JAVA_HOME)/bin/jar
 
+#set to you own group
+MVN_GROUP_ID=org.jetbrains.intellij.deps
+MVN_ARTIFACT_ID=$(PROFILER)
 
 ifeq ($(JAVA_HOME),)
   export JAVA_HOME:=$(shell java -cp . JavaHome)
@@ -22,11 +25,11 @@ OS:=$(shell uname -s)
 ifeq ($(OS), Darwin)
   CPPFLAGS += -D_XOPEN_SOURCE -D_DARWIN_C_SOURCE
   INCLUDES += -I$(JAVA_HOME)/include/darwin
-  RELEASE_TAG:=$(PROFILER_VERSION)-macos-x64
+  RELEASE_TAG:=$(LIBRARY_VERSION)-macos-x64
 else
   LIBS += -lrt
   INCLUDES += -I$(JAVA_HOME)/include/linux
-  RELEASE_TAG:=$(PROFILER_VERSION)-linux-x64
+  RELEASE_TAG:=$(LIBRARY_VERSION)-linux-x64
 endif
 
 
@@ -43,17 +46,26 @@ binaries: $(BINARIES)
 
 build/$(LIB_PROFILER): src/*.cpp src/*.h
 	mkdir -p build
-	$(CPP) $(CPPFLAGS) -DPROFILER_VERSION=\"$(PROFILER_VERSION)\" $(INCLUDES) -fPIC -shared -o $@ src/*.cpp $(LIBS)
+	$(CPP) $(CPPFLAGS) -DPROFILER_VERSION=\"$(LIBRARY_VERSION)\" $(INCLUDES) -fPIC -shared -o $@ src/*.cpp $(LIBS)
 
 build/$(JATTACH): src/jattach/jattach.c
 	mkdir -p build
-	$(CC) $(CFLAGS) -DJATTACH_VERSION=\"$(JATTACH_VERSION)\" -o $@ $^
+	$(CC) $(CFLAGS) -DJATTACH_VERSION=\"$(LIBRARY_VERSION)\" -o $@ $^
 
 build/$(PROFILER_JAR): src/java/one/profiler/*.java
 	mkdir -p build/classes
 	$(JAVAC) -source 6 -target 6 -d build/classes $^
 	$(JAR) cvf $@ -C build/classes .
 	rm -rf build/classes
+
+bintray/$(PROFILER)-$(LIBRARY_VERSION).jar: src/java/one/profiler/*.java
+	mkdir -p bintray
+	$(JAVAC) -source 6 -target 6 -d publish $^
+	sh write_pom.sh $(MVN_GROUP_ID) $(MVN_ARTIFACT_ID) $(LIBRARY_VERSION) > publish/pom.xml
+	$(JAR) cvf $@ publish
+
+bintray: bintray/$(PROFILER)-$(LIBRARY_VERSION).jar
+	mv publish/pom.xml bintray/$(PROFILER)-$(LIBRARY_VERSION).pom
 
 test: all
 	test/smoke-test.sh
@@ -62,3 +74,5 @@ test: all
 
 clean:
 	rm -rf build
+	rm -rf publish
+	rm -rf bintray

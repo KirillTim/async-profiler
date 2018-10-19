@@ -1,4 +1,6 @@
 /build/
+/bintray/
+/publish/
 /nbproject/
 /.idea/
 /test/*.class
