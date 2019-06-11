@@ -23,9 +23,11 @@
 const long DEFAULT_INTERVAL = 10000000;  // 10 ms
 const int DEFAULT_FRAMEBUF = 1000000;
 
-const char* const EVENT_CPU   = "cpu";
-const char* const EVENT_ALLOC = "alloc";
-const char* const EVENT_LOCK  = "lock";
+const char* const EVENT_CPU    = "cpu";
+const char* const EVENT_ALLOC  = "alloc";
+const char* const EVENT_LOCK   = "lock";
+const char* const EVENT_WALL   = "wall";
+const char* const EVENT_ITIMER = "itimer";
 
 enum Action {
     ACTION_NONE,
@@ -40,6 +42,12 @@ enum Action {
 enum Counter {
     COUNTER_SAMPLES,
     COUNTER_TOTAL
+};
+
+enum Ring {
+    RING_ANY,
+    RING_KERNEL,
+    RING_USER
 };
 
 
@@ -72,12 +80,14 @@ class Arguments {
   public:
     Action _action;
     Counter _counter;
+    Ring _ring;
     const char* _event;
     long _interval;
     int  _jstackdepth;
     int _framebuf;
     bool _threads;
     bool _simple;
+    bool _annotate;
     char* _file;
     bool _dump_collapsed;
     bool _dump_flamegraph;
@@ -96,12 +106,14 @@ class Arguments {
     Arguments() :
         _action(ACTION_NONE),
         _counter(COUNTER_SAMPLES),
+        _ring(RING_ANY),
         _event(EVENT_CPU),
         _interval(0),
         _jstackdepth(0),
         _framebuf(DEFAULT_FRAMEBUF),
         _threads(false),
         _simple(false),
+        _annotate(false),
         _file(NULL),
         _dump_collapsed(false),
         _dump_flamegraph(false),

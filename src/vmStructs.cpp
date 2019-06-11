@@ -17,16 +17,18 @@
 #include <stdint.h>
 #include <string.h>
 #include "vmStructs.h"
-#include "codeCache.h"
+#include "vmEntry.h"
 
 
 int VMStructs::_klass_name_offset = -1;
 int VMStructs::_symbol_length_offset = -1;
+int VMStructs::_symbol_length_and_refcount_offset = -1;
 int VMStructs::_symbol_body_offset = -1;
 int VMStructs::_class_klass_offset = -1;
 int VMStructs::_thread_osthread_offset = -1;
 int VMStructs::_osthread_id_offset = -1;
 bool VMStructs::_has_perm_gen = false;
+jfieldID VMStructs::_eetop = NULL;
 
 static uintptr_t readSymbol(NativeCodeCache* lib, const char* symbol_name) {
     const void* symbol = lib->findSymbol(symbol_name);
@@ -57,7 +59,7 @@ void VMStructs::init(NativeCodeCache* libjvm) {
         const char* type = *(const char**)(entry + type_offset);
         const char* field = *(const char**)(entry + field_offset);
         if (type == NULL || field == NULL) {
-            return;
+            break;
         }
 
         if (strcmp(type, "Klass") == 0) {
@@ -67,6 +69,8 @@ void VMStructs::init(NativeCodeCache* libjvm) {
         } else if (strcmp(type, "Symbol") == 0) {
             if (strcmp(field, "_length") == 0) {
                 _symbol_length_offset = *(int*)(entry + offset_offset);
+            } else if (strcmp(field, "_length_and_refcount") == 0) {
+                _symbol_length_and_refcount_offset = *(int*)(entry + offset_offset);
             } else if (strcmp(field, "_body") == 0) {
                 _symbol_body_offset = *(int*)(entry + offset_offset);
             }
@@ -87,5 +91,14 @@ void VMStructs::init(NativeCodeCache* libjvm) {
         }
 
         entry += stride;
+    }
+
+    // Get eetop field - a bridge from Java Thread to VMThread
+    if (_thread_osthread_offset >= 0 && _osthread_id_offset >= 0) {
+        JNIEnv* env = VM::jni();
+        jclass threadClass = env->FindClass("java/lang/Thread");
+        if (threadClass != NULL) {
+            _eetop = env->GetFieldID(threadClass, "eetop", "J");
+        }
     }
 }

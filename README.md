@@ -16,10 +16,18 @@ async-profiler can trace the following kinds of events:
 
 Latest release:
 
- - Linux x64: [async-profiler-1.4-linux-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.4/async-profiler-1.4-linux-x64.tar.gz)
- - macOS x64: [async-profiler-1.4-macos-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.4/async-profiler-1.4-macos-x64.tar.gz)
+ - Linux x64: [async-profiler-1.5-linux-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.5/async-profiler-1.5-linux-x64.tar.gz)
+ - Linux ARM: [async-profiler-1.5-linux-arm.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.5/async-profiler-1.5-linux-arm.tar.gz)
+ - macOS x64: [async-profiler-1.5-macos-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.5/async-profiler-1.5-macos-x64.tar.gz)
 
 [Previous releases](https://github.com/jvm-profiling-tools/async-profiler/releases)
+
+## Supported platforms
+
+- **Linux** / x64 / x86 / ARM / AArch64
+- **macOS** / x64
+
+Note: macOS profiling is limited to user space code only.
 
 ## CPU profiling
 
@@ -80,19 +88,27 @@ The minimum supported JDK version is 7u40 where the TLAB callbacks appeared.
 Heap profiler requires HotSpot debug symbols. Oracle JDK already has them
 embedded in `libjvm.so`, but in OpenJDK builds they are typically shipped
 in a separate package. For example, to install OpenJDK debug symbols on
-Debian / Ubuntu, run
+Debian / Ubuntu, run:
 ```
-# apt-get install openjdk-8-dbg
+# apt install openjdk-8-dbg
 ```
-On Gentoo the ``icedtea`` OpenJDK package can be built with the per-package setting
-``FEATURES="nostrip"`` to retain symbols.
+or for OpenJDK 11:
+```
+# apt install openjdk-11-dbg
+```
 
-## Supported platforms
+On Gentoo the `icedtea` OpenJDK package can be built with the per-package setting
+`FEATURES="nostrip"` to retain symbols.
 
-- **Linux** / x64 / x86 / ARM / AArch64
-- **macOS** / x64
+### Wall-clock profiling
 
-Note: macOS profiling is limited to user space code only.
+`-e wall` option tells async-profiler to sample all threads equally every given
+period of time regardless of thread status: Running, Sleeping or Blocked.
+For instance, this can be helpful when profiling application start-up time.
+
+Wall-clock profiler is most useful in per-thread mode: `-t`.
+
+Example: `./profiler.sh -e wall -t -i 5ms -f result.svg 8983`
 
 ## Building
 
@@ -259,6 +275,8 @@ Example: `./profiler.sh -t 8983`
 
 * `-s` - print simple class names instead of FQN.
 
+* `-a` - annotate Java method names by adding `_[j]` suffix.
+
 * `-o fmt[,fmt...]` - specifies what information to dump when profiling ends.
 This is a comma-separated list of the following options:
   - `summary` - dump basic profiling statistics;
@@ -286,8 +304,35 @@ Example: `./profiler.sh -f profile.svg --title "Sample CPU profile" --minwidth 0
 * `-f FILENAME` - the file name to dump the profile information to.  
 Example: `./profiler.sh -o collapsed -f /tmp/traces.txt 8983`
 
+* `--all-user` - include only user-mode events. This option is helpful when kernel profiling
+is restricted by `perf_event_paranoid` settings.  
+`--all-kernel` is its counterpart option for including only kernel-mode events.
+
 * `-v`, `--version` - prints the version of profiler library. If PID is specified,
 gets the version of the library loaded into the given process.
+
+## Profiling Java in a container
+
+It is possible to profile Java processes running in a Docker or LXC container
+both from within a container and from the host system.
+
+When profiling from the host, `pid` should be the Java process ID in the host
+namespace. Use `ps aux | grep java` or `docker top <container>` to find
+the process ID.
+
+async-profiler should be run from the host by a privileged user - it will
+automatically switch to the proper pid/mount namespace and change
+user credentials to match the target process. Also make sure that
+the target container can access `libasyncProfiler.so` by the same
+absolute path as on the host.
+
+By default, Docker container restricts the access to `perf_event_open`
+syscall. So, in order to allow profiling inside a container, you'll need
+to modify [seccomp profile](https://docs.docker.com/engine/security/seccomp/)
+or disable it altogether with `--security-opt=seccomp:unconfined` option.
+
+Alternatively, if changing Docker configuration is not possible,
+you may fall back to `-e itimer` profiling mode, see [Troubleshooting](#troubleshooting).
 
 ## Restrictions/Limitations
 
@@ -343,10 +388,23 @@ Could not start attach mechanism: No such file or directory
 ```
 The profiler cannot establish communication with the target JVM through UNIX domain socket.
 
-For the profiler to be able to access JVM, make sure
- 1. `/tmp` directory of Java process is physically the same directory as `/tmp` of your shell.
- 2. Attach socket `/tmp/.java_pidNNN` has not been deleted.
- 3. JVM is not run with `-XX:+DisableAttachMechanism` option.
+Usually this happens in one of the following cases:
+ 1. Attach socket `/tmp/.java_pidNNN` has been deleted. It is a common
+ practice to clean `/tmp` automatically with some scheduled script.
+ Configure the cleanup software to exclude `.java_pid*` files from deletion.  
+ How to check: run `lsof -p PID | grep java_pid`  
+ If it lists a socket file, but the file does not exist, then this is exactly
+ the described problem.
+ 2. JVM is started with `-XX:+DisableAttachMechanism` option.
+ 3. `/tmp` directory of Java process is not physically the same directory
+ as `/tmp` of your shell, because Java is running in a container or in
+ `chroot` environment. `jattach` attempts to solve this automatically,
+ but it might lack the required permissions to do so.  
+ Check `strace build/jattach PID properties`
+ 4. JVM is busy and cannot reach a safepoint. For instance,
+ JVM is in the middle of long-running garbage collection.  
+ How to check: run `kill -3 PID`. Healthy JVM process should print
+ a thread dump and heap info in its console.
 
 ```
 Failed to inject profiler into <pid>
@@ -366,6 +424,28 @@ Typical reasons include:
  2. seccomp disables perf_event_open API in a container.
  3. OS runs under a hypervisor that does not virtualize performance counters.
  4. perf_event_open API is not supported on this system, e.g. WSL.
+
+If changing the configuration is not possible, you may fall back to
+`-e itimer` profiling mode. It is similar to `cpu` mode, but does not
+require perf_events support. As a drawback, there will be no kernel
+stack traces. 
+
+```
+No AllocTracer symbols found. Are JDK debug symbols installed?
+```
+It might be needed to install the package with OpenJDK debug symbols.
+See [Allocation profiling](#allocation-profiling) for details.
+
+Note that allocation profiling is not supported on JVMs other than HotSpot, e.g. Zing.
+
+```
+VMStructs unavailable. Unsupported JVM?
+```
+JVM shared library does not export `gHotSpotVMStructs*` symbols -
+apparently this is not a HotSpot JVM. Sometimes the same message
+can be also caused by an incorrectly built JDK
+(see [#218](https://github.com/jvm-profiling-tools/async-profiler/issues/218)).
+In these cases installing JDK debug symbols may solve the problem.
 
 ```
 [frame_buffer_overflow]

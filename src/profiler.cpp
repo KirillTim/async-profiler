@@ -25,15 +25,24 @@
 #include "perfEvents.h"
 #include "allocTracer.h"
 #include "lockTracer.h"
+#include "wallClock.h"
+#include "itimer.h"
 #include "flameGraph.h"
 #include "flightRecorder.h"
 #include "frameName.h"
+#include "os.h"
 #include "stackFrame.h"
 #include "symbols.h"
 #include "vmStructs.h"
 
 
 Profiler Profiler::_instance;
+
+static PerfEvents perf_events;
+static AllocTracer alloc_tracer;
+static LockTracer lock_tracer;
+static WallClock wall_clock;
+static ITimer itimer;
 
 
 u64 Profiler::hashCallTrace(int num_frames, ASGCT_CallFrame* frames) {
@@ -162,6 +171,33 @@ void Profiler::updateJitRange(const void* min_address, const void* max_address) 
     if (max_address > _jit_max_address) _jit_max_address = max_address;
 }
 
+const char* Profiler::asgctError(int code) {
+    switch (code) {
+        case ticks_no_Java_frame:
+        case ticks_unknown_not_Java:
+        case ticks_not_walkable_not_Java:
+            // Not in Java context at all; this is not an error
+            return NULL;
+        case ticks_GC_active:
+            return "GC_active";
+        case ticks_unknown_Java:
+            return "unknown_Java";
+        case ticks_not_walkable_Java:
+            return "not_walkable_Java";
+        case ticks_thread_exit:
+            return "thread_exit";
+        case ticks_deopt:
+            return "deoptimization";
+        case ticks_safepoint:
+            return "safepoint";
+        case ticks_skipped:
+            return "skipped";
+        default:
+            // Should not happen
+            return "unexpected_state";
+    }
+}
+
 NativeCodeCache* Profiler::jvmLibrary() {
     const void* asyncGetCallTraceAddr = (const void*)VM::_asyncGetCallTrace;
     for (int i = 0; i < _native_lib_count; i++) {
@@ -191,10 +227,19 @@ const char* Profiler::findNativeMethod(const void* address) {
     return NULL;
 }
 
-int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, int tid) {
+int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, int tid, bool* stopped_at_java_frame) {
     const void* native_callchain[MAX_NATIVE_FRAMES];
-    int native_frames = PerfEvents::getCallChain(ucontext, tid, native_callchain, MAX_NATIVE_FRAMES,
-                                                 _jit_min_address, _jit_max_address);
+    int native_frames = _engine->getNativeTrace(ucontext, tid, native_callchain, MAX_NATIVE_FRAMES,
+                                                _jit_min_address, _jit_max_address);
+
+    *stopped_at_java_frame = false;
+    if (native_frames > 0) {
+        const void* last_pc = native_callchain[native_frames - 1];
+        if (last_pc >= _jit_min_address && last_pc < _jit_max_address) {
+            *stopped_at_java_frame = true;
+            native_frames--;
+        }
+    }
 
     for (int i = 0; i < native_frames; i++) {
         frames[i].bci = BCI_NATIVE_FRAME;
@@ -207,13 +252,14 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, int tid) {
 int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth) {
     JNIEnv* jni = VM::jni();
     if (jni == NULL) {
-        atomicInc(_failures[-ticks_no_Java_frame]);
+        // Not a Java thread
         return 0;
     }
 
     ASGCT_CallTrace trace = {jni, 0, frames};
     VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
 
+#ifndef SAFE_MODE
     if (trace.num_frames == ticks_unknown_Java) {
         // If current Java stack is not walkable (e.g. the top frame is not fully constructed),
         // try to manually pop the top frame off, hoping that the previous frame is walkable.
@@ -248,16 +294,26 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
             // Restore previous context
             trace.num_frames = ticks_unknown_Java;
         }
+    } else if (trace.num_frames == ticks_GC_active && _JvmtiEnv_GetStackTrace != NULL) {
+        // While GC is running Java threads are known to be at safepoint
+        return getJavaTraceJvmti((jvmtiFrameInfo*)frames, frames, max_depth);
     }
+#endif // SAFE_MODE
 
     if (trace.num_frames > 0) {
         return trace.num_frames;
     }
 
-    // Record failure
-    int type = -trace.num_frames < FAILURE_TYPES ? -trace.num_frames : -ticks_unknown_state;
-    atomicInc(_failures[type]);
-    return 0;
+    const char* err_string = asgctError(trace.num_frames);
+    if (err_string == NULL) {
+        // No Java stack, because thread is not in Java context
+        return 0;
+    }
+
+    atomicInc(_failures[-trace.num_frames]);
+    frames[0].bci = BCI_ERROR;
+    frames[0].method_id = (jmethodID)err_string;
+    return 1;
 }
 
 int Profiler::getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int max_depth) {
@@ -275,7 +331,6 @@ int Profiler::getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* f
         return num_frames;
     }
 
-    atomicInc(_failures[-ticks_no_Java_frame]);
     return 0;
 }
 
@@ -337,11 +392,12 @@ void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, jmetho
     atomicInc(_total_counter, counter);
 
     ASGCT_CallFrame* frames = _calltrace_buffer[lock_index]._asgct_frames;
-    int tid = PerfEvents::tid();
+    int tid = OS::threadId();
 
+    bool need_java_trace = true;
     int num_frames = 0;
     if (event_type == 0) {
-        num_frames = getNativeTrace(ucontext, frames, tid);
+        num_frames = getNativeTrace(ucontext, frames, tid, &need_java_trace);
     } else if (event != NULL) {
         num_frames = makeEventFrame(frames, event_type, event);
     }
@@ -352,32 +408,29 @@ void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, jmetho
         max_depth = _jstackdepth;
     }
 
-    if (event == NULL || _JvmtiEnv_GetStackTrace == NULL) {
-        num_frames += getJavaTraceAsync(ucontext, frames + num_frames, max_depth);
+    if (event_type == 0 || _JvmtiEnv_GetStackTrace == NULL) {
+        if (OS::signalSafeTLS() || need_java_trace) {
+            num_frames += getJavaTraceAsync(ucontext, frames + num_frames, max_depth);
+        }
     } else {
         // Events like object allocation happen at known places where it is safe to call JVM TI
         jvmtiFrameInfo* jvmti_frames = _calltrace_buffer[lock_index]._jvmti_frames;
         num_frames += getJavaTraceJvmti(jvmti_frames + num_frames, frames + num_frames, max_depth);
     }
 
+    if (num_frames == 0 || (num_frames == 1 && event != NULL)) {
+        num_frames += makeEventFrame(frames + num_frames, BCI_ERROR, (jmethodID)"not_walkable");
+    }
+
     if (_threads) {
         num_frames += makeEventFrame(frames + num_frames, BCI_THREAD_ID, (jmethodID)(uintptr_t)tid);
     }
 
-    if (num_frames > 0) {
-        storeMethod(frames[0].method_id, frames[0].bci, counter);
-        int call_trace_id = storeCallTrace(num_frames, frames, counter);
-        _jfr.recordExecutionSample(lock_index, tid, call_trace_id);
-    }
+    storeMethod(frames[0].method_id, frames[0].bci, counter);
+    int call_trace_id = storeCallTrace(num_frames, frames, counter);
+    _jfr.recordExecutionSample(lock_index, tid, call_trace_id);
 
     _locks[lock_index].unlock();
-}
-
-void Profiler::initStateLock() {
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&_state_lock, &attr);
 }
 
 void Profiler::resetSymbols() {
@@ -397,6 +450,10 @@ void Profiler::initJvmtiFunctions(NativeCodeCache* libjvm) {
         if (_ThreadLocalStorage_thread == NULL) {
             _ThreadLocalStorage_thread = (void* (*)()) libjvm->findSymbol("_ZN18ThreadLocalStorage15get_thread_slowEv");
         }
+        // Fallback to Thread::current(), e.g. on Zing
+        if (_ThreadLocalStorage_thread == NULL) {
+            _ThreadLocalStorage_thread = (void* (*)()) libjvm->findSymbol("_ZN6Thread7currentEv");
+        }
         // JvmtiEnv::GetStackTrace(JavaThread* java_thread, jint start_depth, jint max_frame_count, jvmtiFrameInfo* frame_buffer, jint* count_ptr)
         if (_ThreadLocalStorage_thread != NULL) {
             _JvmtiEnv_GetStackTrace = (jvmtiError (*)(void*, void*, jint, jint, jvmtiFrameInfo*, jint*))
@@ -406,6 +463,56 @@ void Profiler::initJvmtiFunctions(NativeCodeCache* libjvm) {
         if (_JvmtiEnv_GetStackTrace == NULL) {
             fprintf(stderr, "WARNING: Install JVM debug symbols to improve profile accuracy\n");
         }
+    }
+}
+
+void Profiler::setThreadName(int tid, const char* name) {
+    MutexLocker ml(_thread_names_lock);
+    _thread_names[tid] = name;
+}
+
+void Profiler::updateThreadName(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
+    if (_threads && VMThread::available()) {
+        VMThread* vm_thread = VMThread::fromJavaThread(jni, thread);
+        jvmtiThreadInfo thread_info;
+        if (vm_thread != NULL && jvmti->GetThreadInfo(thread, &thread_info) == 0) {
+            setThreadName(vm_thread->osThreadId(), thread_info.name);
+            jvmti->Deallocate((unsigned char*)thread_info.name);
+        }
+    }
+}
+
+void Profiler::updateAllThreadNames() {
+    if (_threads && VMThread::available()) {
+        jvmtiEnv* jvmti = VM::jvmti();
+        jint thread_count;
+        jthread* thread_objects;
+        if (jvmti->GetAllThreads(&thread_count, &thread_objects) != 0) {
+            return;
+        }
+
+        JNIEnv* jni = VM::jni();
+        for (int i = 0; i < thread_count; i++) {
+            updateThreadName(jvmti, jni, thread_objects[i]);
+        }
+
+        jvmti->Deallocate((unsigned char*)thread_objects);
+    }
+}
+
+Engine* Profiler::selectEngine(const char* event_name) {
+    if (strcmp(event_name, EVENT_CPU) == 0) {
+        return PerfEvents::supported() ? (Engine*)&perf_events : (Engine*)&wall_clock;
+    } else if (strcmp(event_name, EVENT_ALLOC) == 0) {
+        return &alloc_tracer;
+    } else if (strcmp(event_name, EVENT_LOCK) == 0) {
+        return &lock_tracer;
+    } else if (strcmp(event_name, EVENT_WALL) == 0) {
+        return &wall_clock;
+    } else if (strcmp(event_name, EVENT_ITIMER) == 0) {
+        return &itimer;
+    } else {
+        return &perf_events;
     }
 }
 
@@ -431,12 +538,21 @@ Error Profiler::start(Arguments& args) {
 
     // Reset frames
     free(_frame_buffer);
-    _jstackdepth = args._jstackdepth;
     _frame_buffer_size = args._framebuf;
     _frame_buffer = (ASGCT_CallFrame*)malloc(_frame_buffer_size * sizeof(ASGCT_CallFrame));
+    if (_frame_buffer == NULL) {
+        return Error("Not enough memory to allocate frame buffer");
+    }
     _frame_buffer_index = 0;
     _frame_buffer_overflow = false;
     _threads = args._threads && !args._dump_jfr;
+    _jstackdepth = args._jstackdepth;
+
+    // Reset thread names
+    {
+        MutexLocker ml(_thread_names_lock);
+        _thread_names.clear();
+    }
 
     resetSymbols();
     NativeCodeCache* libjvm = jvmLibrary();
@@ -453,25 +569,16 @@ Error Profiler::start(Arguments& args) {
         }
     }
 
-    if (strcmp(args._event, EVENT_CPU) == 0) {
-        _engine = new PerfEvents();
-        _units = "ns";
-    } else if (strcmp(args._event, EVENT_ALLOC) == 0) {
-        _engine = new AllocTracer();
-        _units = "bytes";
-    } else if (strcmp(args._event, EVENT_LOCK) == 0) {
-        _engine = new LockTracer();
-        _units = "ns";
-    } else {
-        _engine = new PerfEvents();
-        _units = "events";
-    }
-
-    Error error = _engine->start(args._event, args._interval);
+    _engine = selectEngine(args._event);
+    Error error = _engine->start(args);
     if (error) {
-        delete _engine;
         _jfr.stop();
         return error;
+    }
+
+    if (_threads) {
+        // Thread events might be already enabled by PerfEvents::start
+        switchThreadEvents(JVMTI_ENABLE);
     }
 
     _state = RUNNING;
@@ -486,44 +593,41 @@ Error Profiler::stop() {
     }
 
     _engine->stop();
-    delete _engine;
 
     // Acquire all spinlocks to avoid race with remaining signals
     for (int i = 0; i < CONCURRENCY_LEVEL; i++) _locks[i].lock();
     _jfr.stop();
     for (int i = 0; i < CONCURRENCY_LEVEL; i++) _locks[i].unlock();
 
+    switchThreadEvents(JVMTI_DISABLE);
+    updateAllThreadNames();
+
     _state = IDLE;
     return Error::OK;
 }
 
-void Profiler::dumpSummary(std::ostream& out) {
-    static const char* title[FAILURE_TYPES] = {
-        "Non-Java:",
-        "JVM not initialized:",
-        "GC active:",
-        "Unknown (native):",
-        "Not walkable (native):",
-        "Unknown (Java):",
-        "Not walkable (Java):",
-        "Unknown state:",
-        "Thread exit:",
-        "Deopt:",
-        "Safepoint:",
-        "Skipped:"
-    };
+void Profiler::switchThreadEvents(jvmtiEventMode mode) {
+    if (_thread_events_state != mode) {
+        jvmtiEnv* jvmti = VM::jvmti();
+        jvmti->SetEventNotificationMode(mode, JVMTI_EVENT_THREAD_START, NULL);
+        jvmti->SetEventNotificationMode(mode, JVMTI_EVENT_THREAD_END, NULL);
+        _thread_events_state = mode;
+    }
+}
 
+void Profiler::dumpSummary(std::ostream& out) {
     char buf[256];
     snprintf(buf, sizeof(buf),
             "--- Execution profile ---\n"
-            "Total samples:         %lld\n",
+            "Total samples       : %lld\n",
             _total_samples);
     out << buf;
     
     double percent = 100.0 / _total_samples;
-    for (int i = 0; i < FAILURE_TYPES; i++) {
-        if (_failures[i] > 0) {
-            snprintf(buf, sizeof(buf), "%-22s %lld (%.2f%%)\n", title[i], _failures[i], _failures[i] * percent);
+    for (int i = 1; i < ASGCT_FAILURE_TYPES; i++) {
+        const char* err_string = asgctError(-i);
+        if (err_string != NULL && _failures[i] > 0) {
+            snprintf(buf, sizeof(buf), "%-20s: %lld (%.2f%%)\n", err_string, _failures[i], _failures[i] * percent);
             out << buf;
         }
     }
@@ -533,7 +637,7 @@ void Profiler::dumpSummary(std::ostream& out) {
         out << "Frame buffer overflowed! Consider increasing its size." << std::endl;
     } else {
         double usage = 100.0 * _frame_buffer_index / _frame_buffer_size;
-        out << "Frame buffer usage:    " << usage << "%" << std::endl;
+        out << "Frame buffer usage  : " << usage << "%" << std::endl;
     }
     out << std::endl;
 }
@@ -545,9 +649,9 @@ void Profiler::dumpSummary(std::ostream& out) {
  */
 void Profiler::dumpCollapsed(std::ostream& out, Arguments& args) {
     MutexLocker ml(_state_lock);
-    if (_state != IDLE) return;
+    if (_state != IDLE || _engine == NULL) return;
 
-    FrameName fn(args._simple, false, _threads);
+    FrameName fn(args._simple, args._annotate, false, _thread_names_lock, _thread_names);
     u64 unknown = 0;
 
     for (int i = 0; i < MAX_CALLTRACES; i++) {
@@ -573,10 +677,10 @@ void Profiler::dumpCollapsed(std::ostream& out, Arguments& args) {
 
 void Profiler::dumpFlameGraph(std::ostream& out, Arguments& args, bool tree) {
     MutexLocker ml(_state_lock);
-    if (_state != IDLE) return;
+    if (_state != IDLE || _engine == NULL) return;
 
     FlameGraph flamegraph(args._title, args._counter, args._width, args._height, args._minwidth, args._reverse);
-    FrameName fn(args._simple, false, _threads);
+    FrameName fn(args._simple, args._annotate, false, _thread_names_lock, _thread_names);
 
     for (int i = 0; i < MAX_CALLTRACES; i++) {
         CallTraceSample& trace = _traces[i];
@@ -606,9 +710,9 @@ void Profiler::dumpFlameGraph(std::ostream& out, Arguments& args, bool tree) {
 
 void Profiler::dumpTraces(std::ostream& out, int max_traces) {
     MutexLocker ml(_state_lock);
-    if (_state != IDLE) return;
+    if (_state != IDLE || _engine == NULL) return;
 
-    FrameName fn(false, true, _threads);
+    FrameName fn(false, false, true, _thread_names_lock, _thread_names);
     double percent = 100.0 / _total_counter;
     char buf[1024];
 
@@ -620,7 +724,7 @@ void Profiler::dumpTraces(std::ostream& out, int max_traces) {
         if (trace._samples == 0) break;
 
         snprintf(buf, sizeof(buf), "--- %lld %s (%.2f%%), %lld sample%s\n",
-                 trace._counter, _units, trace._counter * percent,
+                 trace._counter, _engine->units(), trace._counter * percent,
                  trace._samples, trace._samples == 1 ? "" : "s");
         out << buf;
 
@@ -639,9 +743,9 @@ void Profiler::dumpTraces(std::ostream& out, int max_traces) {
 
 void Profiler::dumpFlat(std::ostream& out, int max_methods) {
     MutexLocker ml(_state_lock);
-    if (_state != IDLE) return;
+    if (_state != IDLE || _engine == NULL) return;
 
-    FrameName fn(false, true, _threads);
+    FrameName fn(false, false, true, _thread_names_lock, _thread_names);
     double percent = 100.0 / _total_counter;
     char buf[1024];
 
@@ -649,7 +753,7 @@ void Profiler::dumpFlat(std::ostream& out, int max_methods) {
     if (max_methods > MAX_CALLTRACES) max_methods = MAX_CALLTRACES;
 
     snprintf(buf, sizeof(buf), "%12s  percent  samples  top\n"
-                               "  ----------  -------  -------  ---\n", _units);
+                               "  ----------  -------  -------  ---\n", _engine->units());
     out << buf;
 
     for (int i = 0; i < max_methods; i++) {
@@ -693,16 +797,22 @@ void Profiler::runInternal(Arguments& args, std::ostream& out) {
             break;
         }
         case ACTION_LIST: {
-            out << "Perf events:" << std::endl;
-            const char** perf_events = PerfEvents::getAvailableEvents();
-            for (const char** event = perf_events; *event != NULL; event++) {
-                out << "  " << *event << std::endl;
-            }
-            delete[] perf_events;
-
-            out << "Java events:" << std::endl;
+            out << "Basic events:" << std::endl;
+            out << "  " << EVENT_CPU << std::endl;
             out << "  " << EVENT_ALLOC << std::endl;
             out << "  " << EVENT_LOCK << std::endl;
+            out << "  " << EVENT_WALL << std::endl;
+            out << "  " << EVENT_ITIMER << std::endl;
+
+            if (PerfEvents::supported()) {
+                out << "Perf events:" << std::endl;
+                // The first perf event is "cpu" which is already printed
+                for (int event_id = 1; ; event_id++) {
+                    const char* event_name = PerfEvents::getEventName(event_id);
+                    if (event_name == NULL) break;
+                    out << "  " << event_name << std::endl;
+                }
+            }
             break;
         }
         case ACTION_VERSION:

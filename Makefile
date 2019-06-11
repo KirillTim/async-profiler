@@ -1,5 +1,5 @@
-PROFILER_VERSION=1.5-ea
-JATTACH_VERSION=1.5-ea
+PROFILER_VERSION=1.5
+JATTACH_VERSION=1.5
 LIB_PROFILER=libasyncProfiler.so
 JATTACH=jattach
 BINARIES=build/$(LIB_PROFILER) build/$(JATTACH)
@@ -57,6 +57,7 @@ build/$(PROFILER_JAR): src/java/one/profiler/*.java
 
 test: all
 	test/smoke-test.sh
+	test/thread-smoke-test.sh
 	test/alloc-smoke-test.sh
 	echo "All tests passed"
 

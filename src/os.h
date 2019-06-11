@@ -14,14 +14,31 @@
  * limitations under the License.
  */
 
-package one.profiler;
+#ifndef _OS_H
+#define _OS_H
 
-/**
- * Predefined event names to use in {@link AsyncProfiler#start(String, long)}
- */
-public class Events {
-    public static final String CPU   = "cpu";
-    public static final String ALLOC = "alloc";
-    public static final String LOCK  = "lock";
-    public static final String WALL  = "wall";
-}
+#include <signal.h>
+#include "arch.h"
+
+
+class ThreadList {
+  public:
+    virtual ~ThreadList() {}
+    virtual int next() = 0;
+};
+
+
+class OS {
+  public:
+    static u64 nanotime();
+    static u64 millis();
+    static u64 hton64(u64 x);
+    static int threadId();
+    static bool isThreadRunning(int thread_id);
+    static bool signalSafeTLS();
+    static void installSignalHandler(int signo, void (*handler)(int, siginfo_t*, void*));
+    static void sendSignalToThread(int thread_id, int signo);
+    static ThreadList* listThreads();
+};
+
+#endif // _OS_H

@@ -22,58 +22,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include "flightRecorder.h"
+#include "os.h"
 #include "profiler.h"
 #include "vmStructs.h"
 
 
 #define ARRAY_SIZE(arr)  (sizeof(arr) / sizeof(arr[0]))
-
-#ifndef htonll
-
-#ifdef __APPLE__
-
-#include <libkern/OSByteOrder.h>
-#define bswap_64(x) OSSwapInt64(x)
-
-#else
-
-#include <byteswap.h>
-
-#endif // __APPLE__
-
-static inline u64 htonll(u64 x) {
-    return htonl(1) == 1 ? x : bswap_64(x);
-}
-
-#endif // htonll 
-
-
-#ifdef __APPLE__
-#include <mach/mach_time.h>
-
-static mach_timebase_info_data_t timebase = {0, 0};
-
-static inline u64 pd_nanotime() {
-    if (timebase.denom == 0) {
-        mach_timebase_info(&timebase);
-    }
-    return (u64)mach_absolute_time() * timebase.numer / timebase.denom;
-}
-
-#else
-
-static inline u64 pd_nanotime() {
-    struct timespec tp;
-    clock_gettime(CLOCK_MONOTONIC, &tp);
-    return (u64)tp.tv_sec * 1000000000 + tp.tv_nsec;
-}
-
-#endif // __APPLE__
-
 
 const int RECORDING_BUFFER_SIZE = 65536;
 const int RECORDING_LIMIT = RECORDING_BUFFER_SIZE - 4096;
@@ -301,7 +258,7 @@ class Buffer {
     }
 
     void put64(u64 v) {
-        *(u64*)(_data + _offset) = htonll(v);
+        *(u64*)(_data + _offset) = OS::hton64(v);
         _offset += 8;
     }
 
@@ -346,16 +303,16 @@ class Recording {
 
   public:
     Recording(int fd) : _fd(fd), _bytes_written(0), _symbol_map(), _class_map(), _method_map() {
-        _start_time = millis();
-        _start_nanos = nanotime();
+        _start_time = OS::millis();
+        _start_nanos = OS::nanotime();
 
         writeHeader(_buf);
         flush(_buf);
     }
 
     ~Recording() {
-        _stop_nanos = nanotime();
-        _stop_time = millis();
+        _stop_nanos = OS::nanotime();
+        _stop_time = OS::millis();
 
         for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
             flush(&_buf[i]);
@@ -378,21 +335,11 @@ class Recording {
         (void)result;
 
         // Patch metadata offset
-        metadata_offset = htonll(metadata_offset);
+        metadata_offset = OS::hton64(metadata_offset);
         result = pwrite(_fd, &metadata_offset, sizeof(metadata_offset), 8);
         (void)result;
 
         close(_fd);
-    }
-
-    u64 millis() {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        return (u64)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-    }
-
-    u64 nanotime() {
-        return pd_nanotime();
     }
 
     int lookup(std::map<std::string, int>& map, std::string key) {
@@ -436,7 +383,7 @@ class Recording {
         if (mi->_key == 0) {
             mi->_key = _method_map.size();
 
-            if (frame.bci == BCI_NATIVE_FRAME || method == NULL) {
+            if (frame.bci == BCI_NATIVE_FRAME || frame.bci == BCI_ERROR || method == NULL) {
                 std::string name;
                 FrameTypeId type = demangle((const char*)method, name);
                 mi->_class = lookup(_class_map, "");
@@ -567,7 +514,7 @@ class Recording {
                 buf->put64(i);  // stack trace key
                 buf->put8(0);   // truncated
                 buf->put32(trace._num_frames);
-                for (int j = trace._num_frames - 1; j >= 0; j--) {
+                for (int j = 0; j < trace._num_frames; j++) {
                     MethodInfo* mi = resolveMethod(frame_buffer[trace._start_frame + j]);
                     buf->put64(mi->_key);  // method key
                     buf->put32(0);         // bci
@@ -744,7 +691,7 @@ class Recording {
         Buffer* buf = &_buf[lock_index];
         buf->put32(30);
         buf->put32(EVENT_EXECUTION_SAMPLE);
-        buf->put64(nanotime());
+        buf->put64(OS::nanotime());
         buf->put32(tid);
         buf->put64(call_trace_id);
         buf->put16(STATE_RUNNABLE);

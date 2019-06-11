@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Andrei Pangin
+ * Copyright 2018 Andrei Pangin
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,25 +14,30 @@
  * limitations under the License.
  */
 
-#ifndef _ENGINE_H
-#define _ENGINE_H
+#ifndef _ITIMER_H
+#define _ITIMER_H
 
-#include "arguments.h"
+#include <signal.h>
+#include "engine.h"
 
 
-class Engine {
+class ITimer : public Engine {
+  private:
+    static long _interval;
+
+    static void signalHandler(int signo, siginfo_t* siginfo, void* ucontext);
+
   public:
-    virtual const char* name() = 0;
-    virtual const char* units() = 0;
+    const char* name() {
+        return "itimer";
+    }
 
-    virtual Error start(Arguments& args) = 0;
-    virtual void stop() = 0;
+    const char* units() {
+        return "ns";
+    }
 
-    virtual void onThreadStart() {}
-    virtual void onThreadEnd() {}
-
-    virtual int getNativeTrace(void* ucontext, int tid, const void** callchain, int max_depth,
-                               const void* jit_min_address, const void* jit_max_address);
+    Error start(Arguments& args);
+    void stop();
 };
 
-#endif // _ENGINE_H
+#endif // _ITIMER_H
