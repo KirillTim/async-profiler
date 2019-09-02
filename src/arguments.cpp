@@ -15,13 +15,20 @@
  */
 
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include "arguments.h"
 
 
 // Predefined value that denotes successful operation
 const Error Error::OK(NULL);
+
+// Extra buffer space for expanding file pattern
+const size_t EXTRA_BUF_SIZE = 512;
 
 
 // Parses agent arguments.
@@ -43,13 +50,15 @@ const Error Error::OK(NULL);
 //     traces[=N]    - dump top N call traces
 //     flat[=N]      - dump top N methods (aka flat profile)
 //     interval=N    - sampling interval in ns (default: 10'000'000, i.e. 10 ms)
-//     jstackdepth=N - maximum Java stack depth (default: MAX_STACK_FRAMES)
+//     jstackdepth=N - maximum Java stack depth (default: 2048)
 //     framebuf=N    - size of the buffer for stack frames (default: 1'000'000)
 //     threads       - profile different threads separately
 //     allkernel     - include only kernel-mode events
 //     alluser       - include only user-mode events
-//     simple[=bool] - simple class names instead of FQN
-//     ann[=bool]    - annotate Java method names
+//     simple        - simple class names instead of FQN
+//     dot           - dotted class names
+//     sig           - print method signatures
+//     ann           - annotate Java method names
 //     title=TITLE   - FlameGraph title
 //     width=PX      - FlameGraph image width
 //     height=PX     - FlameGraph frame height
@@ -62,10 +71,14 @@ const Error Error::OK(NULL);
 Error Arguments::parse(const char* args) {
     if (args == NULL) {
         return Error::OK;
-    } else if (strlen(args) >= sizeof(_buf)) {
-        return Error("Argument list too long");
     }
 
+    size_t len = strlen(args);
+    free(_buf);
+    _buf = (char*)malloc(len + EXTRA_BUF_SIZE);
+    if (_buf == NULL) {
+        return Error("Not enough memory to parse arguments");
+    }
     strcpy(_buf, args);
 
     for (char* arg = strtok(_buf, ","); arg != NULL; arg = strtok(NULL, ",")) {
@@ -123,9 +136,13 @@ Error Arguments::parse(const char* args) {
         } else if (strcmp(arg, "alluser") == 0) {
             _ring = RING_USER;
         } else if (strcmp(arg, "simple") == 0) {
-            _simple = value == NULL || strcmp(value, "true") == 0;
+            _style |= STYLE_SIMPLE;
+        } else if (strcmp(arg, "dot") == 0) {
+            _style |= STYLE_DOTTED;
+        } else if (strcmp(arg, "sig") == 0) {
+            _style |= STYLE_SIGNATURES;
         } else if (strcmp(arg, "ann") == 0) {
-            _annotate = value == NULL || strcmp(value, "true") == 0;
+            _style |= STYLE_ANNOTATE;
         } else if (strcmp(arg, "title") == 0 && value != NULL) {
             _title = value;
         } else if (strcmp(arg, "width") == 0 && value != NULL) {
@@ -144,11 +161,47 @@ Error Arguments::parse(const char* args) {
         }
     }
 
+    if (_file != NULL && strchr(_file, '%') != NULL) {
+        _file = expandFilePattern(_buf + len + 1, EXTRA_BUF_SIZE - 1, _file);
+    }
+
     if (dumpRequested() && (_action == ACTION_NONE || _action == ACTION_STOP)) {
         _action = ACTION_DUMP;
     }
 
     return Error::OK;
+}
+
+// Expands %p to the process id
+//         %t to the timestamp
+const char* Arguments::expandFilePattern(char* dest, size_t max_size, const char* pattern) {
+    char* ptr = dest;
+    char* end = dest + max_size - 1;
+
+    while (ptr < end && *pattern != 0) {
+        char c = *pattern++;
+        if (c == '%') {
+            c = *pattern++;
+            if (c == 0) {
+                break;
+            } else if (c == 'p') {
+                ptr += snprintf(ptr, end - ptr, "%d", getpid());
+                continue;
+            } else if (c == 't') {
+                time_t timestamp = time(NULL);
+                struct tm t;
+                localtime_r(&timestamp, &t);
+                ptr += snprintf(ptr, end - ptr, "%d%02d%02d-%02d%02d%02d",
+                                t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                                t.tm_hour, t.tm_min, t.tm_sec);
+                continue;
+            }
+        }
+        *ptr++ = c;
+    }
+
+    *ptr = 0;
+    return dest;
 }
 
 long Arguments::parseUnits(const char* str) {
@@ -169,4 +222,14 @@ long Arguments::parseUnits(const char* str) {
     }
 
     return result;
+}
+
+Arguments::~Arguments() {
+    free(_buf);
+}
+
+void Arguments::assign(Arguments& other) {
+    free(_buf);
+    *this = other;
+    other._buf = NULL;
 }

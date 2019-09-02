@@ -14,7 +14,13 @@ async-profiler can trace the following kinds of events:
 
 ## Download
 
-Latest release:
+Current version (1.6-ea):
+
+ - Linux x64 (glibc): [async-profiler-1.6-ea-linux-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6-ea/async-profiler-1.6-ea-linux-x64.tar.gz)
+ - Linux x64 (musl): [async-profiler-1.6-ea-linux-x64-musl.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6-ea/async-profiler-1.6-ea-linux-x64-musl.tar.gz)
+ - macOS x64: [async-profiler-1.6-ea-macos-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6-ea/async-profiler-1.6-ea-macos-x64.tar.gz)
+
+Latest release (1.5):
 
  - Linux x64: [async-profiler-1.5-linux-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.5/async-profiler-1.5-linux-x64.tar.gz)
  - Linux ARM: [async-profiler-1.5-linux-arm.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.5/async-profiler-1.5-linux-arm.tar.gz)
@@ -78,6 +84,15 @@ where _N_ is the average size of TLAB. This makes heap sampling very cheap
 and suitable for production. On the other hand, the collected data
 may be incomplete, though in practice it will often reflect the top allocation
 sources.
+
+Sampling interval can be adjusted with `-i` option.
+For example, `-i 500k` will take one sample after 500 KB of allocated
+space on average. However, intervals less than TLAB size will not take effect.
+If you want to profile allocations with higher frequency, reduce the TLAB size,
+e.g.
+```
+-XX:MinTLABSize=1 -XX:TLABSize=1 -XX:-ResizeTLAB
+```
 
 Unlike Java Mission Control which uses similar approach, async-profiler
 does not require Java Flight Recorder or any other JDK commercial feature.
@@ -261,7 +276,7 @@ are collected while CPU is idle. The default is 10000000 (10ms).
 Example: `./profiler.sh -i 500us 8983`
 
 * `-j N` - sets the Java stack profiling depth. This option will be ignored if N is greater 
-than default MAX_STACK_FRAMES.  
+than default 2048.  
 Example: `./profiler.sh -j 30 8983`
 
 * `-b N` - sets the frame buffer size, in the number of Java
@@ -274,6 +289,8 @@ that denotes a single thread.
 Example: `./profiler.sh -t 8983`
 
 * `-s` - print simple class names instead of FQN.
+
+* `-g` - print method signatures.
 
 * `-a` - annotate Java method names by adding `_[j]` suffix.
 

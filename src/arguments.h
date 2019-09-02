@@ -22,6 +22,7 @@
 
 const long DEFAULT_INTERVAL = 10000000;  // 10 ms
 const int DEFAULT_FRAMEBUF = 1000000;
+const int DEFAULT_JSTACKDEPTH = 2048;
 
 const char* const EVENT_CPU    = "cpu";
 const char* const EVENT_ALLOC  = "alloc";
@@ -50,6 +51,13 @@ enum Ring {
     RING_USER
 };
 
+enum Style {
+    STYLE_SIMPLE     = 1,
+    STYLE_DOTTED     = 2,
+    STYLE_SIGNATURES = 4,
+    STYLE_ANNOTATE   = 8
+};
+
 
 class Error {
   private:
@@ -73,8 +81,9 @@ class Error {
 
 class Arguments {
   private:
-    char _buf[1024];
+    char* _buf;
 
+    const char* expandFilePattern(char* dest, size_t max_size, const char* pattern);
     long parseUnits(const char* str);
 
   public:
@@ -86,9 +95,8 @@ class Arguments {
     int  _jstackdepth;
     int _framebuf;
     bool _threads;
-    bool _simple;
-    bool _annotate;
-    char* _file;
+    int _style;
+    const char* _file;
     bool _dump_collapsed;
     bool _dump_flamegraph;
     bool _dump_tree;
@@ -104,16 +112,16 @@ class Arguments {
     bool _reverse;
 
     Arguments() :
+        _buf(NULL),
         _action(ACTION_NONE),
         _counter(COUNTER_SAMPLES),
         _ring(RING_ANY),
         _event(EVENT_CPU),
         _interval(0),
-        _jstackdepth(0),
+        _jstackdepth(DEFAULT_JSTACKDEPTH),
         _framebuf(DEFAULT_FRAMEBUF),
         _threads(false),
-        _simple(false),
-        _annotate(false),
+        _style(0),
         _file(NULL),
         _dump_collapsed(false),
         _dump_flamegraph(false),
@@ -125,15 +133,19 @@ class Arguments {
         _title("Flame Graph"),
         _width(1200),
         _height(16),
-        _minwidth(1),
+        _minwidth(0.25),
         _reverse(false) {
     }
+
+    ~Arguments();
+
+    void assign(Arguments& other);
+
+    Error parse(const char* args);
 
     bool dumpRequested() {
         return _dump_collapsed || _dump_flamegraph || _dump_tree || _dump_jfr || _dump_summary || _dump_traces > 0 || _dump_flat > 0;
     }
-
-    Error parse(const char* args);
 };
 
 #endif // _ARGUMENTS_H

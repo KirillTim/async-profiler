@@ -1,4 +1,4 @@
-PROFILER_VERSION=1.5
+PROFILER_VERSION=1.6-ea
 JATTACH_VERSION=1.5
 LIB_PROFILER=libasyncProfiler.so
 JATTACH=jattach
@@ -59,6 +59,7 @@ test: all
 	test/smoke-test.sh
 	test/thread-smoke-test.sh
 	test/alloc-smoke-test.sh
+	test/load-library-test.sh
 	echo "All tests passed"
 
 clean:
