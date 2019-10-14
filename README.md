@@ -14,11 +14,12 @@ async-profiler can trace the following kinds of events:
 
 ## Download
 
-Latest release:
+Latest release (1.6):
 
- - Linux x64: [async-profiler-1.5-linux-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.5/async-profiler-1.5-linux-x64.tar.gz)
- - Linux ARM: [async-profiler-1.5-linux-arm.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.5/async-profiler-1.5-linux-arm.tar.gz)
- - macOS x64: [async-profiler-1.5-macos-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.5/async-profiler-1.5-macos-x64.tar.gz)
+ - Linux x64 (glibc): [async-profiler-1.6-linux-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6/async-profiler-1.6-linux-x64.tar.gz)
+ - Linux x64 (musl): [async-profiler-1.6-linux-x64-musl.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6/async-profiler-1.6-linux-x64-musl.tar.gz)
+ - Linux ARM: [async-profiler-1.6-linux-arm.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6/async-profiler-1.6-linux-arm.tar.gz)
+ - macOS x64: [async-profiler-1.6-macos-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6/async-profiler-1.6-macos-x64.tar.gz)
 
 [Previous releases](https://github.com/jvm-profiling-tools/async-profiler/releases)
 
@@ -78,6 +79,15 @@ where _N_ is the average size of TLAB. This makes heap sampling very cheap
 and suitable for production. On the other hand, the collected data
 may be incomplete, though in practice it will often reflect the top allocation
 sources.
+
+Sampling interval can be adjusted with `-i` option.
+For example, `-i 500k` will take one sample after 500 KB of allocated
+space on average. However, intervals less than TLAB size will not take effect.
+If you want to profile allocations with higher frequency, reduce the TLAB size,
+e.g.
+```
+-XX:MinTLABSize=1 -XX:TLABSize=1 -XX:-ResizeTLAB
+```
 
 Unlike Java Mission Control which uses similar approach, async-profiler
 does not require Java Flight Recorder or any other JDK commercial feature.
@@ -188,13 +198,19 @@ If you need to profile some code as soon as the JVM starts up, instead of using 
 it is possible to attach async-profiler as an agent on the command line. For example:
 
 ```
-$ java -agentpath:/path/to/libasyncProfiler.so=start,svg,file=profile.svg ...
+$ java -agentpath:/path/to/libasyncProfiler.so=start,file=profile.svg ...
 ```
 
-Agent library is configured through the JVMTI argument interface. The format of the arguments string is described [in the source code](https://github.com/jvm-profiling-tools/async-profiler/blob/af94b0e55178c46e17c573a65c498d25b58b641b/src/arguments.cpp#L26). The `profiler.sh` script actually
-converts command line arguments to the that format.
+Agent library is configured through the JVMTI argument interface.
+The format of the arguments string is described
+[in the source code](https://github.com/jvm-profiling-tools/async-profiler/blob/b7e9e6b955210784d5dc1d1839bb0febab1b712b/src/arguments.cpp#L34).
+The `profiler.sh` script actually converts command line arguments to the that format.
 
-For instance, `-e alloc` is converted to `event=alloc`, `-f profile.svg` is converted to `file=profile.svg` and so on. But some arguments are processed directly by `profiler.sh` script. E.g. `-d 5` results in 3 actions: 1) attaching profiler agent with start command, sleeping for 5 seconds, and then attaching the agent again with stop command.
+For instance, `-e alloc` is converted to `event=alloc`, `-f profile.svg`
+is converted to `file=profile.svg` and so on. But some arguments are processed
+directly by `profiler.sh` script. E.g. `-d 5` results in 3 actions:
+attaching profiler agent with start command, sleeping for 5 seconds,
+and then attaching the agent again with stop command.
 
 ## Flame Graph visualization
 
@@ -221,6 +237,10 @@ The following is a complete list of the command-line options accepted by
 * `start` - starts profiling in semi-automatic mode, i.e. profiler will run
 until `stop` command is explicitly called.
 
+* `resume` - starts or resumes earlier profiling session that has been stopped.
+All the collected data remains valid. The profiling options are not preserved
+between sessions, and should be specified again.
+
 * `stop` - stops profiling and prints the report.
 
 * `status` - prints profiling status: whether profiler is active and
@@ -229,7 +249,7 @@ for how long.
 * `list` - show the list of available profiling events. This option still
 requires PID, since supported events may differ depending on JVM version.
 
-* `-d N` - the profiling duration, in seconds. If no `start`, `stop`
+* `-d N` - the profiling duration, in seconds. If no `start`, `resume`, `stop`
 or `status` option is given, the profiler will run for the specified period
 of time and then automatically stop.  
 Example: `./profiler.sh -d 30 8983`
@@ -261,7 +281,7 @@ are collected while CPU is idle. The default is 10000000 (10ms).
 Example: `./profiler.sh -i 500us 8983`
 
 * `-j N` - sets the Java stack profiling depth. This option will be ignored if N is greater 
-than default MAX_STACK_FRAMES.  
+than default 2048.  
 Example: `./profiler.sh -j 30 8983`
 
 * `-b N` - sets the frame buffer size, in the number of Java
@@ -275,10 +295,12 @@ Example: `./profiler.sh -t 8983`
 
 * `-s` - print simple class names instead of FQN.
 
+* `-g` - print method signatures.
+
 * `-a` - annotate Java method names by adding `_[j]` suffix.
 
-* `-o fmt[,fmt...]` - specifies what information to dump when profiling ends.
-This is a comma-separated list of the following options:
+* `-o fmt` - specifies what information to dump when profiling ends.
+`fmt` can be one of the following options:
   - `summary` - dump basic profiling statistics;
   - `traces[=N]` - dump call traces (at most N samples);
   - `flat[=N]` - dump flat profile (top N hot methods);
@@ -296,17 +318,25 @@ This is a comma-separated list of the following options:
   - `samples` - the counter is a number of samples for the given trace;
   - `total` - the counter is a total value of collected metric, e.g. total allocation size.
   
+  `summary`, `traces` and `flat` can be combined together.  
   The default format is `summary,traces=200,flat=200`.
 
 * `--title TITLE`, `--width PX`, `--height PX`, `--minwidth PX`, `--reverse` - FlameGraph parameters.  
 Example: `./profiler.sh -f profile.svg --title "Sample CPU profile" --minwidth 0.5 8983`
 
 * `-f FILENAME` - the file name to dump the profile information to.  
-Example: `./profiler.sh -o collapsed -f /tmp/traces.txt 8983`
+`%p` in the file name is expanded to the PID of the target JVM;  
+`%t` - to the timestamp at the time of command invocation.  
+Example: `./profiler.sh -o collapsed -f /tmp/traces-%t.txt 8983`
 
 * `--all-user` - include only user-mode events. This option is helpful when kernel profiling
 is restricted by `perf_event_paranoid` settings.  
 `--all-kernel` is its counterpart option for including only kernel-mode events.
+
+* `--sync-walk` - prefer synchronous JVMTI stack walker instead of `AsyncGetCallTrace`.
+This option may improve accuracy of Java stack traces when profiling JVM runtime
+functions, e.g. `VMThread::execute`, `G1CollectedHeap::humongous_obj_allocate` etc.
+Do not use unless you are absolutely sure! When used incorrectly, this mode will crash JVM! 
 
 * `-v`, `--version` - prints the version of profiler library. If PID is specified,
 gets the version of the library loaded into the given process.
@@ -446,6 +476,14 @@ apparently this is not a HotSpot JVM. Sometimes the same message
 can be also caused by an incorrectly built JDK
 (see [#218](https://github.com/jvm-profiling-tools/async-profiler/issues/218)).
 In these cases installing JDK debug symbols may solve the problem.
+
+```
+Could not parse symbols due to the OS bug
+```
+Async-profiler was unable to parse non-Java function names because of
+the corrupted contents in `/proc/[pid]/maps`. The problem is known to
+occur in a container when running Ubuntu with Linux kernel 5.x.
+This is the OS bug, see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1843018.
 
 ```
 [frame_buffer_overflow]

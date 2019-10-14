@@ -15,6 +15,7 @@
  */
 
 #include <fstream>
+#include <dlfcn.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -200,7 +201,8 @@ const char* Profiler::asgctError(int code) {
 
 NativeCodeCache* Profiler::jvmLibrary() {
     const void* asyncGetCallTraceAddr = (const void*)VM::_asyncGetCallTrace;
-    for (int i = 0; i < _native_lib_count; i++) {
+    const int native_lib_count = _native_lib_count;
+    for (int i = 0; i < native_lib_count; i++) {
         if (_native_libs[i]->contains(asyncGetCallTraceAddr)) {
             return _native_libs[i];
         }
@@ -209,7 +211,8 @@ NativeCodeCache* Profiler::jvmLibrary() {
 }
 
 const void* Profiler::findSymbol(const char* name) {
-    for (int i = 0; i < _native_lib_count; i++) {
+    const int native_lib_count = _native_lib_count;
+    for (int i = 0; i < native_lib_count; i++) {
         const void* address = _native_libs[i]->findSymbol(name);
         if (address != NULL) {
             return address;
@@ -219,7 +222,8 @@ const void* Profiler::findSymbol(const char* name) {
 }
 
 const char* Profiler::findNativeMethod(const void* address) {
-    for (int i = 0; i < _native_lib_count; i++) {
+    const int native_lib_count = _native_lib_count;
+    for (int i = 0; i < native_lib_count; i++) {
         if (_native_libs[i]->contains(address)) {
             return _native_libs[i]->binarySearch(address);
         }
@@ -372,7 +376,8 @@ bool Profiler::addressInCode(const void* pc) {
     }
 
     // 2. Check if PC belongs to executable code of shared libraries
-    for (int i = 0; i < _native_lib_count; i++) {
+    const int native_lib_count = _native_lib_count;
+    for (int i = 0; i < native_lib_count; i++) {
         if (_native_libs[i]->contains(pc)) {
             return true;
         }
@@ -383,18 +388,25 @@ bool Profiler::addressInCode(const void* pc) {
 }
 
 void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, jmethodID event) {
+    int tid = OS::threadId();
+
     u64 lock_index = atomicInc(_total_samples) % CONCURRENCY_LEVEL;
     if (!_locks[lock_index].tryLock()) {
-        atomicInc(_failures[-ticks_skipped]);  // too many concurrent signals already
+        // Too many concurrent signals already
+        atomicInc(_failures[-ticks_skipped]);
+
+        if (event_type == 0) {
+            // Need to reset PerfEvents ring buffer, even though we discard the collected trace
+            _engine->getNativeTrace(ucontext, tid, NULL, 0, _jit_min_address, _jit_max_address);
+        }
         return;
     }
 
     atomicInc(_total_counter, counter);
 
-    ASGCT_CallFrame* frames = _calltrace_buffer[lock_index]._asgct_frames;
-    int tid = OS::threadId();
-
+    ASGCT_CallFrame* frames = _calltrace_buffer[lock_index]->_asgct_frames;
     bool need_java_trace = true;
+
     int num_frames = 0;
     if (event_type == 0) {
         num_frames = getNativeTrace(ucontext, frames, tid, &need_java_trace);
@@ -402,20 +414,12 @@ void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, jmetho
         num_frames = makeEventFrame(frames, event_type, event);
     }
 
-    // It is possible to limit Java stack walking depth for performance reasons
-    int max_depth = MAX_STACK_FRAMES - 1 - num_frames;
-    if (_jstackdepth > 0 && _jstackdepth < max_depth) {
-        max_depth = _jstackdepth;
-    }
-
-    if (event_type == 0 || _JvmtiEnv_GetStackTrace == NULL) {
-        if (OS::signalSafeTLS() || need_java_trace) {
-            num_frames += getJavaTraceAsync(ucontext, frames + num_frames, max_depth);
-        }
-    } else {
+    if ((_sync_walk || event_type != 0) && _JvmtiEnv_GetStackTrace != NULL) {
         // Events like object allocation happen at known places where it is safe to call JVM TI
-        jvmtiFrameInfo* jvmti_frames = _calltrace_buffer[lock_index]._jvmti_frames;
-        num_frames += getJavaTraceJvmti(jvmti_frames + num_frames, frames + num_frames, max_depth);
+        jvmtiFrameInfo* jvmti_frames = _calltrace_buffer[lock_index]->_jvmti_frames;
+        num_frames += getJavaTraceJvmti(jvmti_frames + num_frames, frames + num_frames, _max_stack_depth);
+    } else if (OS::isSignalSafeTLS() || need_java_trace) {
+        num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth);
     }
 
     if (num_frames == 0 || (num_frames == 1 && event != NULL)) {
@@ -433,11 +437,47 @@ void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, jmetho
     _locks[lock_index].unlock();
 }
 
-void Profiler::resetSymbols() {
-    for (int i = 0; i < _native_lib_count; i++) {
-        delete _native_libs[i];
+jboolean JNICALL Profiler::NativeLibraryLoadTrap(JNIEnv* env, jobject self, jstring name, jboolean builtin) {
+    jboolean result = _instance._original_NativeLibrary_load(env, self, name, builtin);
+    Symbols::parseLibraries(_instance._native_libs, _instance._native_lib_count, MAX_NATIVE_LIBS);
+    return result;
+}
+
+void Profiler::bindNativeLibraryLoad(NativeLoadLibraryFunc entry) {
+    JNIEnv* env = VM::jni();
+    jclass NativeLibrary = env->FindClass("java/lang/ClassLoader$NativeLibrary");
+
+    if (NativeLibrary != NULL) {
+        // Find JNI entry for NativeLibrary.load() method
+        if (_original_NativeLibrary_load == NULL) {
+            if (env->GetMethodID(NativeLibrary, "load0", "(Ljava/lang/String;Z)V") != NULL) {
+                // JDK 9+
+                _load_method.name = (char*)"load0";
+                _load_method.signature = (char*)"(Ljava/lang/String;Z)V";
+            } else if (env->GetMethodID(NativeLibrary, "load", "(Ljava/lang/String;Z)V") != NULL) {
+                // JDK 8
+                _load_method.name = (char*)"load";
+                _load_method.signature = (char*)"(Ljava/lang/String;Z)V";
+            } else {
+                // JDK 7
+                _load_method.name = (char*)"load";
+                _load_method.signature = (char*)"(Ljava/lang/String;)V";
+            }
+
+            char jni_name[64];
+            strcpy(jni_name, "Java_java_lang_ClassLoader_00024NativeLibrary_");
+            strcat(jni_name, _load_method.name);
+            _original_NativeLibrary_load = (NativeLoadLibraryFunc)dlsym(VM::_libjava, jni_name);
+        }
+
+        // Change function pointer for the native method
+        if (_original_NativeLibrary_load != NULL) {
+            _load_method.fnPtr = (void*)entry;
+            env->RegisterNatives(NativeLibrary, &_load_method, 1);
+        }
     }
-    _native_lib_count = Symbols::parseMaps(_native_libs, MAX_NATIVE_LIBS);
+
+    env->ExceptionClear();
 }
 
 void Profiler::initJvmtiFunctions(NativeCodeCache* libjvm) {
@@ -516,7 +556,7 @@ Engine* Profiler::selectEngine(const char* event_name) {
     }
 }
 
-Error Profiler::start(Arguments& args) {
+Error Profiler::start(Arguments& args, bool reset) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE) {
         return Error("Profiler already started");
@@ -526,35 +566,59 @@ Error Profiler::start(Arguments& args) {
         return Error("Could not find AsyncGetCallTrace function");
     }
 
-    _total_samples = 0;
-    _total_counter = 0;
-    memset(_failures, 0, sizeof(_failures));
-    memset(_hashes, 0, sizeof(_hashes));
-    memset(_traces, 0, sizeof(_traces));
-    memset(_methods, 0, sizeof(_methods));
+    bool first_time = _native_lib_count == 0;
+    if (first_time || reset) {
+        // Reset counters
+        _total_samples = 0;
+        _total_counter = 0;
+        memset(_failures, 0, sizeof(_failures));
+        memset(_hashes, 0, sizeof(_hashes));
+        memset(_traces, 0, sizeof(_traces));
+        memset(_methods, 0, sizeof(_methods));
 
-    // Index 0 denotes special call trace with no frames
-    _hashes[0] = (u64)-1;
+        // Index 0 denotes special call trace with no frames
+        _hashes[0] = (u64)-1;
 
-    // Reset frames
-    free(_frame_buffer);
-    _frame_buffer_size = args._framebuf;
-    _frame_buffer = (ASGCT_CallFrame*)malloc(_frame_buffer_size * sizeof(ASGCT_CallFrame));
-    if (_frame_buffer == NULL) {
-        return Error("Not enough memory to allocate frame buffer");
-    }
-    _frame_buffer_index = 0;
-    _frame_buffer_overflow = false;
-    _threads = args._threads && !args._dump_jfr;
-    _jstackdepth = args._jstackdepth;
+        // Reset frame buffer
+        _frame_buffer_index = 0;
+        _frame_buffer_overflow = false;
 
-    // Reset thread names
-    {
-        MutexLocker ml(_thread_names_lock);
-        _thread_names.clear();
+        // Reset thread names
+        {
+            MutexLocker ml(_thread_names_lock);
+            _thread_names.clear();
+        }
     }
 
-    resetSymbols();
+    // (Re-)allocate frames
+    if (_frame_buffer_size != args._framebuf) {
+        _frame_buffer_size = args._framebuf;
+        _frame_buffer = (ASGCT_CallFrame*)realloc(_frame_buffer, _frame_buffer_size * sizeof(ASGCT_CallFrame));
+        if (_frame_buffer == NULL) {
+            _frame_buffer_size = 0;
+            return Error("Not enough memory to allocate frame buffer (try smaller framebuf)");
+        }
+    }
+
+    // (Re-)allocate calltrace buffers
+    if (_max_stack_depth != args._jstackdepth) {
+        _max_stack_depth = args._jstackdepth;
+        size_t buffer_size = (_max_stack_depth + MAX_NATIVE_FRAMES + RESERVED_FRAMES) * sizeof(CallTraceBuffer);
+
+        for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
+            free(_calltrace_buffer[i]);
+            _calltrace_buffer[i] = (CallTraceBuffer*)malloc(buffer_size);
+            if (_calltrace_buffer[i] == NULL) {
+                _max_stack_depth = 0;
+                return Error("Not enough memory to allocate stack trace buffers (try smaller jstackdepth)");
+            }
+        }
+    }
+
+    _threads = args._threads && args._output != OUTPUT_JFR;
+    _sync_walk = args._sync_walk;
+
+    Symbols::parseLibraries(_native_libs, _native_lib_count, MAX_NATIVE_LIBS);
     NativeCodeCache* libjvm = jvmLibrary();
     if (libjvm == NULL) {
         return Error("libjvm not found among loaded libraries");
@@ -562,7 +626,7 @@ Error Profiler::start(Arguments& args) {
     VMStructs::init(libjvm);
     initJvmtiFunctions(libjvm);
 
-    if (args._dump_jfr) {
+    if (args._output == OUTPUT_JFR) {
         Error error = _jfr.start(args._file);
         if (error) {
             return error;
@@ -581,6 +645,8 @@ Error Profiler::start(Arguments& args) {
         switchThreadEvents(JVMTI_ENABLE);
     }
 
+    bindNativeLibraryLoad(NativeLibraryLoadTrap);
+
     _state = RUNNING;
     _start_time = time(NULL);
     return Error::OK;
@@ -598,6 +664,8 @@ Error Profiler::stop() {
     for (int i = 0; i < CONCURRENCY_LEVEL; i++) _locks[i].lock();
     _jfr.stop();
     for (int i = 0; i < CONCURRENCY_LEVEL; i++) _locks[i].unlock();
+
+    bindNativeLibraryLoad(_original_NativeLibrary_load);
 
     switchThreadEvents(JVMTI_DISABLE);
     updateAllThreadNames();
@@ -651,7 +719,7 @@ void Profiler::dumpCollapsed(std::ostream& out, Arguments& args) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE || _engine == NULL) return;
 
-    FrameName fn(args._simple, args._annotate, false, _thread_names_lock, _thread_names);
+    FrameName fn(args._style, _thread_names_lock, _thread_names);
     u64 unknown = 0;
 
     for (int i = 0; i < MAX_CALLTRACES; i++) {
@@ -680,7 +748,7 @@ void Profiler::dumpFlameGraph(std::ostream& out, Arguments& args, bool tree) {
     if (_state != IDLE || _engine == NULL) return;
 
     FlameGraph flamegraph(args._title, args._counter, args._width, args._height, args._minwidth, args._reverse);
-    FrameName fn(args._simple, args._annotate, false, _thread_names_lock, _thread_names);
+    FrameName fn(args._style, _thread_names_lock, _thread_names);
 
     for (int i = 0; i < MAX_CALLTRACES; i++) {
         CallTraceSample& trace = _traces[i];
@@ -708,69 +776,82 @@ void Profiler::dumpFlameGraph(std::ostream& out, Arguments& args, bool tree) {
     flamegraph.dump(out, tree);
 }
 
-void Profiler::dumpTraces(std::ostream& out, int max_traces) {
+void Profiler::dumpTraces(std::ostream& out, Arguments& args) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE || _engine == NULL) return;
 
-    FrameName fn(false, false, true, _thread_names_lock, _thread_names);
+    FrameName fn(args._style | STYLE_DOTTED, _thread_names_lock, _thread_names);
     double percent = 100.0 / _total_counter;
     char buf[1024];
 
-    qsort(_traces, MAX_CALLTRACES, sizeof(CallTraceSample), CallTraceSample::comparator);
-    if (max_traces > MAX_CALLTRACES) max_traces = MAX_CALLTRACES;
+    CallTraceSample** traces = new CallTraceSample*[MAX_CALLTRACES];
+    for (int i = 0; i < MAX_CALLTRACES; i++) {
+        traces[i] = &_traces[i];
+    }
+    qsort(traces, MAX_CALLTRACES, sizeof(CallTraceSample*), CallTraceSample::comparator);
 
+    int max_traces = args._dump_traces < MAX_CALLTRACES ? args._dump_traces : MAX_CALLTRACES;
     for (int i = 0; i < max_traces; i++) {
-        CallTraceSample& trace = _traces[i];
-        if (trace._samples == 0) break;
+        CallTraceSample* trace = traces[i];
+        if (trace->_samples == 0) break;
 
         snprintf(buf, sizeof(buf), "--- %lld %s (%.2f%%), %lld sample%s\n",
-                 trace._counter, _engine->units(), trace._counter * percent,
-                 trace._samples, trace._samples == 1 ? "" : "s");
+                 trace->_counter, _engine->units(), trace->_counter * percent,
+                 trace->_samples, trace->_samples == 1 ? "" : "s");
         out << buf;
 
-        if (trace._num_frames == 0) {
+        if (trace->_num_frames == 0) {
             out << "  [ 0] [frame_buffer_overflow]\n";
         }
 
-        for (int j = 0; j < trace._num_frames; j++) {
-            const char* frame_name = fn.name(_frame_buffer[trace._start_frame + j]);
+        for (int j = 0; j < trace->_num_frames; j++) {
+            const char* frame_name = fn.name(_frame_buffer[trace->_start_frame + j]);
             snprintf(buf, sizeof(buf), "  [%2d] %s\n", j, frame_name);
             out << buf;
         }
         out << "\n";
     }
+
+    delete[] traces;
 }
 
-void Profiler::dumpFlat(std::ostream& out, int max_methods) {
+void Profiler::dumpFlat(std::ostream& out, Arguments& args) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE || _engine == NULL) return;
 
-    FrameName fn(false, false, true, _thread_names_lock, _thread_names);
+    FrameName fn(args._style | STYLE_DOTTED, _thread_names_lock, _thread_names);
     double percent = 100.0 / _total_counter;
     char buf[1024];
 
-    qsort(_methods, MAX_CALLTRACES, sizeof(MethodSample), MethodSample::comparator);
-    if (max_methods > MAX_CALLTRACES) max_methods = MAX_CALLTRACES;
+    MethodSample** methods = new MethodSample*[MAX_CALLTRACES];
+    for (int i = 0; i < MAX_CALLTRACES; i++) {
+        methods[i] = &_methods[i];
+    }
+    qsort(methods, MAX_CALLTRACES, sizeof(MethodSample*), MethodSample::comparator);
 
     snprintf(buf, sizeof(buf), "%12s  percent  samples  top\n"
                                "  ----------  -------  -------  ---\n", _engine->units());
     out << buf;
 
+    int max_methods = args._dump_flat < MAX_CALLTRACES ? args._dump_flat : MAX_CALLTRACES;
     for (int i = 0; i < max_methods; i++) {
-        MethodSample& method = _methods[i];
-        if (method._samples == 0) break;
+        MethodSample* method = methods[i];
+        if (method->_samples == 0) break;
 
-        const char* frame_name = fn.name(method._method);
+        const char* frame_name = fn.name(method->_method);
         snprintf(buf, sizeof(buf), "%12lld  %6.2f%%  %7lld  %s\n",
-                 method._counter, method._counter * percent, method._samples, frame_name);
+                 method->_counter, method->_counter * percent, method->_samples, frame_name);
         out << buf;
     }
+
+    delete[] methods;
 }
 
 void Profiler::runInternal(Arguments& args, std::ostream& out) {
     switch (args._action) {
-        case ACTION_START: {
-            Error error = start(args);
+        case ACTION_START:
+        case ACTION_RESUME: {
+            Error error = start(args, args._action == ACTION_START);
             if (error) {
                 out << error.message() << std::endl;
             } else {
@@ -820,12 +901,24 @@ void Profiler::runInternal(Arguments& args, std::ostream& out) {
             break;
         case ACTION_DUMP:
             stop();
-            if (args._dump_collapsed) dumpCollapsed(out, args);
-            if (args._dump_flamegraph) dumpFlameGraph(out, args, false);
-            if (args._dump_tree) dumpFlameGraph(out, args, true);
-            if (args._dump_summary) dumpSummary(out);
-            if (args._dump_traces > 0) dumpTraces(out, args._dump_traces);
-            if (args._dump_flat > 0) dumpFlat(out, args._dump_flat);
+            switch (args._output) {
+                case OUTPUT_COLLAPSED:
+                    dumpCollapsed(out, args);
+                    break;
+                case OUTPUT_FLAMEGRAPH:
+                    dumpFlameGraph(out, args, false);
+                    break;
+                case OUTPUT_TREE:
+                    dumpFlameGraph(out, args, true);
+                    break;
+                case OUTPUT_TEXT:
+                    dumpSummary(out);
+                    if (args._dump_traces > 0) dumpTraces(out, args);
+                    if (args._dump_flat > 0) dumpFlat(out, args);
+                    break;
+                default:
+                    break;
+            }
             break;
         default:
             break;
@@ -833,7 +926,7 @@ void Profiler::runInternal(Arguments& args, std::ostream& out) {
 }
 
 void Profiler::run(Arguments& args) {
-    if (args._file == NULL || args._dump_jfr) {
+    if (args._file == NULL || args._output == OUTPUT_JFR) {
         runInternal(args, std::cout);
     } else {
         std::ofstream out(args._file, std::ios::out | std::ios::trunc);
@@ -850,7 +943,7 @@ void Profiler::shutdown(Arguments& args) {
     MutexLocker ml(_state_lock);
 
     // The last chance to dump profile before VM terminates
-    if (_state == RUNNING && args.dumpRequested()) {
+    if (_state == RUNNING && args._output != OUTPUT_NONE) {
         args._action = ACTION_DUMP;
         run(args);
     }

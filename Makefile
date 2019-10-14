@@ -1,4 +1,4 @@
-PROFILER_VERSION=1.5
+PROFILER_VERSION=1.6
 JATTACH_VERSION=1.5
 LIB_PROFILER=libasyncProfiler.so
 JATTACH=jattach
@@ -37,6 +37,8 @@ all: build/$(PROFILER_JAR)
 release: async-profiler-$(RELEASE_TAG).tar.gz
 
 async-profiler-$(RELEASE_TAG).tar.gz: $(BINARIES) build/$(PROFILER_JAR) profiler.sh LICENSE *.md
+	chmod 755 build profiler.sh
+	chmod 644 LICENSE *.md
 	tar cvzf $@ $^
 
 binaries: $(BINARIES)
@@ -59,6 +61,7 @@ test: all
 	test/smoke-test.sh
 	test/thread-smoke-test.sh
 	test/alloc-smoke-test.sh
+	test/load-library-test.sh
 	echo "All tests passed"
 
 clean:
