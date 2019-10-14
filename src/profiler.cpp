@@ -36,6 +36,10 @@
 #include "symbols.h"
 #include "vmStructs.h"
 
+#include <inttypes.h>
+
+#include <chrono>
+
 
 Profiler Profiler::_instance;
 
@@ -156,7 +160,10 @@ void Profiler::addJavaMethod(const void* address, int length, jmethodID method) 
 
 void Profiler::removeJavaMethod(const void* address, jmethodID method) {
     _jit_lock.lock();
+    FrameName fn(0, _thread_names_lock, _thread_names);
+    fn.precomputeMethodName(method);
     _java_methods.remove(address, method);
+
     _jit_lock.unlock();
 }
 
@@ -263,6 +270,11 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
     ASGCT_CallTrace trace = {jni, 0, frames};
     VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
 
+    uintptr_t pcStore = NULL; 
+    uintptr_t pc_after_pop = NULL;
+    bool entry_frame_fill = false;
+    bool pop_frame = false;
+    bool pop_frame_actually_called = false;
 #ifndef SAFE_MODE
     if (trace.num_frames == ticks_unknown_Java) {
         // If current Java stack is not walkable (e.g. the top frame is not fully constructed),
@@ -273,10 +285,12 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
         uintptr_t pc = top_frame.pc(),
                   sp = top_frame.sp(),
                   fp = top_frame.fp();
+        pcStore = pc;
 
         // Guess top method by PC and insert it manually into the call trace
         bool is_entry_frame = false;
         if (fillTopFrame((const void*)pc, trace.frames)) {
+            entry_frame_fill = true;
             is_entry_frame = trace.frames->bci == BCI_NATIVE_FRAME &&
                              strcmp((const char*)trace.frames->method_id, "call_stub") == 0;
             trace.frames++;
@@ -284,9 +298,12 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
         }
 
         if (top_frame.pop(is_entry_frame)) {
+            pop_frame = true;
             // Retry with the fixed context, but only if PC looks reasonable,
             // otherwise AsyncGetCallTrace may crash
-            if (addressInCode((const void*)top_frame.pc())) {
+            pc_after_pop = top_frame.pc();
+            if (addressInCode((const void*)pc_after_pop)) {
+                pop_frame_actually_called = true;
                 VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
             }
             top_frame.restore(pc, sp, fp);
@@ -315,6 +332,50 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
     }
 
     atomicInc(_failures[-trace.num_frames]);
+    
+
+    static unsigned int tickCounter = 0;
+    if (trace.num_frames == ticks_unknown_Java) {
+        using namespace std::chrono;
+    
+        milliseconds ms = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
+        const void* pc_after_pop_ptr = (const void*) pc_after_pop;
+        bool is_in_jit_code = false;
+        bool java_method_found = false;
+        if (pc_after_pop_ptr >= _jit_min_address && pc_after_pop_ptr < _jit_max_address) {
+            is_in_jit_code = true;
+            //printf("fix-HIT: time = %ld, ptr = %" PRIxPTR ", method = %d \n", ms.count(), java_method_found);
+        }
+        java_method_found = _java_methods.find(pc_after_pop_ptr) != NULL;
+
+        //printf("fix-REPORT: time = %ld, %s %" PRIxPTR " %d %d %d %" PRIxPTR "\n", ms.count(), err_string, pcStore, entry_frame_fill, pop_frame, pop_frame_actually_called, pc_after_pop);
+
+        bool is_at_pop_insn = false;
+        bool is_after_repne_scasq = false;
+        uint32_t prev_insn = 0;
+        uint8_t prev_lcq = 0;
+        if (*(const char*)pcStore == 0x58) {
+            is_at_pop_insn = true;
+
+            const uint8_t* pc_ptr_prev = (const uint8_t*)pcStore - 3;
+            prev_lcq = pc_ptr_prev[0];
+            prev_insn = *((const uint32_t*)pc_ptr_prev);
+            if (pc_ptr_prev[0] == 0xf2 && pc_ptr_prev[1] == 0x48) {
+                is_after_repne_scasq = true;
+            }
+        }
+
+        char* buffer = (char*)malloc(256);
+        sprintf(buffer, "%s pc_%" PRIxPTR " eff_%d pop_%d retry_%d pc_pop_%" PRIxPTR " jit_%d m_%d insn_pop_%d insn_repne_%d prev_insn_%x lcq_%x", err_string, pcStore, entry_frame_fill, pop_frame, pop_frame_actually_called, pc_after_pop, is_in_jit_code, java_method_found, is_at_pop_insn, is_after_repne_scasq, prev_insn, prev_lcq);
+
+        char* buffer2 = (char*)malloc(256);
+        sprintf(buffer2, "%s eff_%d pop_%d retry_%d jit_%d m_%d insn_pop_%d insn_repne_%d prev_insn_%x lcq_%x", err_string, entry_frame_fill, pop_frame, pop_frame_actually_called, is_in_jit_code, java_method_found, is_at_pop_insn, is_after_repne_scasq, prev_insn, prev_lcq);
+        frames[0].bci = BCI_NATIVE_FRAME;
+        frames[0].method_id = (jmethodID)buffer;
+        frames[1].bci = BCI_NATIVE_FRAME;
+        frames[1].method_id = (jmethodID)buffer2;
+        return 2;
+    }
     frames[0].bci = BCI_ERROR;
     frames[0].method_id = (jmethodID)err_string;
     return 1;
@@ -370,7 +431,7 @@ bool Profiler::addressInCode(const void* pc) {
     // Address in CodeCache is executable if it belongs to a Java method or a runtime stub
     if (pc >= _jit_min_address && pc < _jit_max_address) {
         _jit_lock.lockShared();
-        bool valid = _java_methods.find(pc) != NULL || _runtime_stubs.find(pc) != NULL;
+        bool valid = (_java_methods.find(pc) != NULL) || (_runtime_stubs.find(pc) != NULL);
         _jit_lock.unlockShared();
         return valid;
     }

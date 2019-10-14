@@ -45,11 +45,15 @@ class FrameName {
     char* javaMethodName(jmethodID method);
     char* javaClassName(const char* symbol, int length, int style);
 
+
+
   public:
     FrameName(int style, Mutex& thread_names_lock, ThreadMap& thread_names);
     ~FrameName();
 
     const char* name(ASGCT_CallFrame& frame);
+    const char* precomputeMethodName(jmethodID method);
 };
+
 
 #endif // _FRAMENAME_H

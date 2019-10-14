@@ -91,6 +91,8 @@ enum State {
     TERMINATED
 };
 
+std::string my_formatter(const char *fmt, ...);
+
 class Profiler {
   private:
     Mutex _state_lock;
@@ -139,6 +141,7 @@ class Profiler {
     void removeJavaMethod(const void* address, jmethodID method);
     void addRuntimeStub(const void* address, int length, const char* name);
     void updateJitRange(const void* min_address, const void* max_address);
+    void ensureEventFile();
 
     const char* asgctError(int code);
     const char* findNativeMethod(const void* address);

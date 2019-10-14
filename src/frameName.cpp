@@ -130,6 +130,17 @@ char* FrameName::javaClassName(const char* symbol, int length, int style) {
     return result;
 }
 
+const char* FrameName::precomputeMethodName(jmethodID method_id) {
+    JMethodCache::iterator it = _cache.lower_bound(method_id);
+    if (it != _cache.end() && it->first == method_id) {
+        return it->second.c_str();
+    }
+
+    const char* newName = javaMethodName(method_id);
+    _cache.insert(it, JMethodCache::value_type(method_id, newName));
+    return newName;
+}
+
 const char* FrameName::name(ASGCT_CallFrame& frame) {
     if (frame.method_id == NULL) {
         return "[unknown]";
@@ -169,14 +180,7 @@ const char* FrameName::name(ASGCT_CallFrame& frame) {
         }
 
         default: {
-            JMethodCache::iterator it = _cache.lower_bound(frame.method_id);
-            if (it != _cache.end() && it->first == frame.method_id) {
-                return it->second.c_str();
-            }
-
-            const char* newName = javaMethodName(frame.method_id);
-            _cache.insert(it, JMethodCache::value_type(frame.method_id, newName));
-            return newName;
+            return precomputeMethodName(frame.method_id);
         }
     }
 }

@@ -50,7 +50,7 @@ void CodeCache::remove(const void* start, jmethodID method) {
 
 jmethodID CodeCache::find(const void* address) {
     for (int i = 0; i < _count; i++) {
-        if (address >= _blobs[i]._start && address < _blobs[i]._end) {
+        if (address >= _blobs[i]._start && address < _blobs[i]._end && _blobs[i]._method != NULL) {
             return _blobs[i]._method;
         }
     }
