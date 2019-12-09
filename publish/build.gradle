@@ -1,0 +1,85 @@
+plugins {
+    id "com.jfrog.bintray" version "1.8.4"
+    id 'maven-publish'
+    id 'java'
+}
+
+sourceCompatibility = 1.6
+targetCompatibility = 1.6
+
+def binariesPath = "$projectDir/binaries"
+
+task allBinaries {
+    doFirst {
+        checkHaveAllBinaries(binariesPath)
+    }
+    outputs.files files(binariesPath)
+}
+
+def checkHaveAllBinaries(String path) {
+    File pathFile = file(path)
+    List<String> systems = ["linux", "macos"]
+    List<String> binaries = ["jattach", "libasyncProfiler.so"]
+    systems.each { os ->
+        File osDir = new File(pathFile, os)
+        if (!osDir.exists()) {
+            throw new GradleException("Can't find '$os' directory in '$path'")
+        }
+        binaries.each { binary ->
+            if (!new File(osDir, binary).exists()) {
+                throw new GradleException("Can't find '$binary' in '$osDir'")
+            }
+        }
+    }
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs file("$projectDir/../src/java")
+        }
+    }
+}
+
+jar {
+    from sourceSets.main.output
+    into ('binaries') {
+        from allBinaries
+    }
+    version mvnVersion
+}
+
+task sourceJar(type: Jar) {
+    from file("$projectDir/../src")
+    classifier 'sources'
+    version mvnVersion
+}
+
+publishing {
+    publications {
+        MyPublication(MavenPublication) {
+            from components.java
+            groupId mvnGroupId
+            artifactId mvnArtefactId
+            artifact sourceJar
+            version mvnVersion
+        }
+    }
+}
+
+bintray {
+    user = System.getenv('BINTRAY_USER')
+    key = System.getenv('BINTRAY_KEY')
+
+    publish = true
+
+    pkg {
+        repo = bintrayRepo
+        name = bintrayPkgName
+        userOrg = bintrayUserOrg //An optional organization name when the repo belongs to one of the user's orgs
+
+        version.name = mvnVersion
+    }
+
+    publications = ['MyPublication']
+}
