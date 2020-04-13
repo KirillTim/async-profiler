@@ -1,5 +1,6 @@
-PROFILER_VERSION=1.6
+PROFILER_VERSION=1.7
 JATTACH_VERSION=1.5
+JAVAC_RELEASE_VERSION=6
 LIB_PROFILER=libasyncProfiler.so
 JATTACH=jattach
 BINARIES=build/$(LIB_PROFILER) build/$(JATTACH)
@@ -12,7 +13,6 @@ INCLUDES=-I$(JAVA_HOME)/include
 LIBS=-ldl -lpthread
 JAVAC=$(JAVA_HOME)/bin/javac
 JAR=$(JAVA_HOME)/bin/jar
-
 
 ifeq ($(JAVA_HOME),)
   export JAVA_HOME:=$(shell java -cp . JavaHome)
@@ -36,9 +36,9 @@ all: build/$(PROFILER_JAR)
 
 release: async-profiler-$(RELEASE_TAG).tar.gz
 
-async-profiler-$(RELEASE_TAG).tar.gz: $(BINARIES) build/$(PROFILER_JAR) profiler.sh LICENSE *.md
+async-profiler-$(RELEASE_TAG).tar.gz: $(BINARIES) build/$(PROFILER_JAR) profiler.sh LICENSE NOTICE *.md
 	chmod 755 build profiler.sh
-	chmod 644 LICENSE *.md
+	chmod 644 LICENSE NOTICE *.md
 	tar cvzf $@ $^
 
 binaries: $(BINARIES)
@@ -53,7 +53,7 @@ build/$(JATTACH): src/jattach/jattach.c
 
 build/$(PROFILER_JAR): src/java/one/profiler/*.java
 	mkdir -p build/classes
-	$(JAVAC) -source 6 -target 6 -d build/classes $^
+	$(JAVAC) -source $(JAVAC_RELEASE_VERSION) -target $(JAVAC_RELEASE_VERSION) -d build/classes $^
 	$(JAR) cvf $@ -C build/classes .
 	rm -rf build/classes
 

@@ -18,6 +18,9 @@
 #define _ARCH_H
 
 
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
 typedef unsigned long long u64;
 
 static inline u64 atomicInc(volatile u64& var, u64 increment = 1) {
@@ -33,6 +36,7 @@ static inline int atomicInc(volatile int& var, int increment = 1) {
 
 typedef unsigned char instruction_t;
 const instruction_t BREAKPOINT = 0xcc;
+const int SYSCALL_SIZE = 2;
 
 #define spinPause()       asm volatile("pause")
 #define rmb()             asm volatile("lfence" : : : "memory")
@@ -42,6 +46,7 @@ const instruction_t BREAKPOINT = 0xcc;
 
 typedef unsigned int instruction_t;
 const instruction_t BREAKPOINT = 0xe7f001f0;
+const int SYSCALL_SIZE = sizeof(instruction_t);
 
 #define spinPause()       asm volatile("yield")
 #define rmb()             asm volatile("dmb ish" : : : "memory")
@@ -51,6 +56,7 @@ const instruction_t BREAKPOINT = 0xe7f001f0;
 
 typedef unsigned int instruction_t;
 const instruction_t BREAKPOINT = 0xd4200000;
+const int SYSCALL_SIZE = sizeof(instruction_t);
 
 #define spinPause()       asm volatile("yield")
 #define rmb()             asm volatile("dmb ish" : : : "memory")

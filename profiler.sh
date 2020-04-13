@@ -6,6 +6,7 @@ usage() {
     echo "  start             start profiling and return immediately"
     echo "  resume            resume profiling without resetting collected data"
     echo "  stop              stop profiling"
+    echo "  check             check if the specified profiling event is available"
     echo "  status            print profiling status"
     echo "  list              list profiling events supported by the target JVM"
     echo "  collect           collect profile for the specified period of time"
@@ -22,6 +23,8 @@ usage() {
     echo "  -g                print method signatures"
     echo "  -a                annotate Java method names"
     echo "  -o fmt            output format: summary|traces|flat|collapsed|svg|tree|jfr"
+    echo "  -I include        output only stack traces containing the specified pattern"
+    echo "  -X exclude        exclude stack traces with the specified pattern"
     echo "  -v, --version     display version string"
     echo ""
     echo "  --title string    SVG title"
@@ -32,7 +35,8 @@ usage() {
     echo ""
     echo "  --all-kernel      only include kernel-mode events"
     echo "  --all-user        only include user-mode events"
-    echo "  --sync-walk       use synchronous JVMTI stack walker (dangerous!)"
+    echo "  --cstack          collect C stack when profiling Java-level events"
+    echo "  --no-cstack       never collect C stack"
     echo ""
     echo "<pid> is a numeric process ID of the target JVM"
     echo "      or 'jps' keyword to find running JVM automatically"
@@ -108,7 +112,7 @@ while [[ $# -gt 0 ]]; do
         -h|"-?")
             usage
             ;;
-        start|resume|stop|status|list|collect)
+        start|resume|stop|check|status|list|collect)
             ACTION="$1"
             ;;
         -v|--version)
@@ -155,6 +159,14 @@ while [[ $# -gt 0 ]]; do
             OUTPUT="$2"
             shift
             ;;
+        -I|--include)
+            FORMAT="$FORMAT,include=$2"
+            shift
+            ;;
+        -X|--exclude)
+            FORMAT="$FORMAT,exclude=$2"
+            shift
+            ;;
         --title)
             # escape XML special characters and comma
             TITLE=${2//&/&amp;}
@@ -177,8 +189,11 @@ while [[ $# -gt 0 ]]; do
         --all-user)
             PARAMS="$PARAMS,alluser"
             ;;
-        --sync-walk)
-            PARAMS="$PARAMS,syncwalk"
+        --cstack)
+            PARAMS="$PARAMS,cstack=y"
+            ;;
+        --no-cstack)
+            PARAMS="$PARAMS,cstack=n"
             ;;
         [0-9]*)
             PID="$1"
@@ -210,7 +225,7 @@ elif [[ $FILE != /* ]]; then
 fi
 
 case $ACTION in
-    start|resume)
+    start|resume|check)
         jattach "$ACTION,event=$EVENT,file=$FILE,$OUTPUT$FORMAT$PARAMS"
         ;;
     stop)
@@ -232,9 +247,9 @@ case $ACTION in
         ;;
     version)
         if [[ "$PID" == "" ]]; then
-            java "-agentpath:$PROFILER=version" -version 2> /dev/null
+            java "-agentpath:$PROFILER=version=full" -version 2> /dev/null
         else
-            jattach "version,file=$FILE"
+            jattach "version=full,file=$FILE"
         fi
         ;;
 esac

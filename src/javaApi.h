@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Andrei Pangin
+ * Copyright 2020 Andrei Pangin
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,31 +14,16 @@
  * limitations under the License.
  */
 
-#ifndef _ITIMER_H
-#define _ITIMER_H
+#ifndef _JAVAAPI_H
+#define _JAVAAPI_H
 
-#include <signal.h>
-#include "engine.h"
+#include <jvmti.h>
 
 
-class ITimer : public Engine {
-  private:
-    static long _interval;
-
-    static void signalHandler(int signo, siginfo_t* siginfo, void* ucontext);
-
+class JavaAPI {
   public:
-    const char* name() {
-        return "itimer";
-    }
-
-    const char* units() {
-        return "ns";
-    }
-
-    Error check(Arguments& args);
-    Error start(Arguments& args);
-    void stop();
+    static void throwNew(JNIEnv* env, const char* exception_class, const char* message);
+    static void registerNatives(jvmtiEnv* jvmti, JNIEnv* jni);
 };
 
-#endif // _ITIMER_H
+#endif // _JAVAAPI_H

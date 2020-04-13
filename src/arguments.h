@@ -35,9 +35,11 @@ enum Action {
     ACTION_START,
     ACTION_RESUME,
     ACTION_STOP,
+    ACTION_CHECK,
     ACTION_STATUS,
     ACTION_LIST,
     ACTION_VERSION,
+    ACTION_FULL_VERSION,
     ACTION_DUMP
 };
 
@@ -93,6 +95,9 @@ class Arguments {
   private:
     char* _buf;
 
+    void appendToEmbeddedList(int& list, char* value);
+
+    static long long hash(const char* arg);
     static const char* expandFilePattern(char* dest, size_t max_size, const char* pattern);
     static Output detectOutputFormat(const char* file);
     static long parseUnits(const char* str);
@@ -105,10 +110,13 @@ class Arguments {
     long _interval;
     int  _jstackdepth;
     int _framebuf;
-    bool _threads;
-    bool _sync_walk;
-    int _style;
     const char* _file;
+    const char* _filter;
+    int _include;
+    int _exclude;
+    bool _threads;
+    char _cstack;
+    int _style;
     Output _output;
     int _dump_traces;
     int _dump_flat;
@@ -128,10 +136,13 @@ class Arguments {
         _interval(0),
         _jstackdepth(DEFAULT_JSTACKDEPTH),
         _framebuf(DEFAULT_FRAMEBUF),
-        _threads(false),
-        _sync_walk(false),
-        _style(0),
         _file(NULL),
+        _filter(NULL),
+        _include(0),
+        _exclude(0),
+        _threads(false),
+        _cstack(0),
+        _style(0),
         _output(OUTPUT_NONE),
         _dump_traces(0),
         _dump_flat(0),
@@ -147,6 +158,8 @@ class Arguments {
     void save(Arguments& other);
 
     Error parse(const char* args);
+
+    friend class FrameName;
 };
 
 #endif // _ARGUMENTS_H

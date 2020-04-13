@@ -4,7 +4,7 @@ This project is a low overhead sampling profiler for Java
 that does not suffer from [Safepoint bias problem](http://psy-lob-saw.blogspot.ru/2016/02/why-most-sampling-java-profilers-are.html).
 It features HotSpot-specific APIs to collect stack traces
 and to track memory allocations. The profiler works with
-OpenJDK, Oracle JDK and other Java runtimes based on HotSpot JVM.
+OpenJDK, Oracle JDK and other Java runtimes based on the HotSpot JVM.
 
 async-profiler can trace the following kinds of events:
  - CPU cycles
@@ -14,12 +14,13 @@ async-profiler can trace the following kinds of events:
 
 ## Download
 
-Latest release (1.6):
+Latest release (1.7):
 
- - Linux x64 (glibc): [async-profiler-1.6-linux-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6/async-profiler-1.6-linux-x64.tar.gz)
- - Linux x64 (musl): [async-profiler-1.6-linux-x64-musl.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6/async-profiler-1.6-linux-x64-musl.tar.gz)
- - Linux ARM: [async-profiler-1.6-linux-arm.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6/async-profiler-1.6-linux-arm.tar.gz)
- - macOS x64: [async-profiler-1.6-macos-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.6/async-profiler-1.6-macos-x64.tar.gz)
+ - Linux x64 (glibc): [async-profiler-1.7-linux-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.7/async-profiler-1.7-linux-x64.tar.gz)
+ - Linux x86 (glibc): [async-profiler-1.7-linux-x86.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.7/async-profiler-1.7-linux-x86.tar.gz)
+ - Linux x64 (musl): [async-profiler-1.7-linux-x64-musl.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.7/async-profiler-1.7-linux-x64-musl.tar.gz)
+ - Linux ARM: [async-profiler-1.7-linux-arm.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.7/async-profiler-1.7-linux-arm.tar.gz)
+ - macOS x64: [async-profiler-1.7-macos-x64.tar.gz](https://github.com/jvm-profiling-tools/async-profiler/releases/download/v1.7/async-profiler-1.7-macos-x64.tar.gz)
 
 [Previous releases](https://github.com/jvm-profiling-tools/async-profiler/releases)
 
@@ -71,8 +72,8 @@ like allocation elimination. Only actual heap allocations are measured.
 
 The profiler features TLAB-driven sampling. It relies on HotSpot-specific
 callbacks to receive two kinds of notifications:
- - when an object is allocated in a newly created TLAB;
- - when an object is allocated on a slow path outside TLAB.
+ - when an object is allocated in a newly created TLAB (aqua frames in a Flame Graph);
+ - when an object is allocated on a slow path outside TLAB (brown frames).
 
 This means not each allocation is counted, but only allocations every _N_ kB,
 where _N_ is the average size of TLAB. This makes heap sampling very cheap
@@ -120,6 +121,17 @@ For instance, this can be helpful when profiling application start-up time.
 Wall-clock profiler is most useful in per-thread mode: `-t`.
 
 Example: `./profiler.sh -e wall -t -i 5ms -f result.svg 8983`
+
+## Java method profiling
+
+`-e ClassName.methodName` option instruments the given Java method
+in order to record all invocations of this method with the stack traces.
+
+Example: `-e java.util.Properties.getProperty` will profile all places
+where `getProperty` method is called from.
+
+Only non-native Java methods are supported. To profile a native method,
+use hardware breakpoint event instead, e.g. `-e Java_java_lang_Throwable_fillInStackTrace`
 
 ## Building
 
@@ -205,7 +217,7 @@ $ java -agentpath:/path/to/libasyncProfiler.so=start,file=profile.svg ...
 Agent library is configured through the JVMTI argument interface.
 The format of the arguments string is described
 [in the source code](https://github.com/jvm-profiling-tools/async-profiler/blob/b7e9e6b955210784d5dc1d1839bb0febab1b712b/src/arguments.cpp#L34).
-The `profiler.sh` script actually converts command line arguments to the that format.
+The `profiler.sh` script actually converts command line arguments to that format.
 
 For instance, `-e alloc` is converted to `event=alloc`, `-f profile.svg`
 is converted to `file=profile.svg` and so on. But some arguments are processed
@@ -243,6 +255,8 @@ All the collected data remains valid. The profiling options are not preserved
 between sessions, and should be specified again.
 
 * `stop` - stops profiling and prints the report.
+
+* `check` - check if the specified profiling event is available.
 
 * `status` - prints profiling status: whether profiler is active and
 for how long.
@@ -322,6 +336,13 @@ Example: `./profiler.sh -t 8983`
   `summary`, `traces` and `flat` can be combined together.  
   The default format is `summary,traces=200,flat=200`.
 
+* `-I include`, `-X exclude` - filter stack traces by the given pattern(s).
+`-I` defines the name pattern that *must* be present in the stack traces,
+while `-X` is the pattern that *must not* occur in any of stack traces in the output.
+`-I` and `-X` options can be specified multiple times. A pattern may begin or end with
+a star `*` that denotes any (possibly empty) sequence of characters.  
+Example: `./profiler.sh -I 'Primes.*' -I 'java/*' -X '*Unsafe.park*' 8983`
+
 * `--title TITLE`, `--width PX`, `--height PX`, `--minwidth PX`, `--reverse` - FlameGraph parameters.  
 Example: `./profiler.sh -f profile.svg --title "Sample CPU profile" --minwidth 0.5 8983`
 
@@ -334,10 +355,11 @@ Example: `./profiler.sh -o collapsed -f /tmp/traces-%t.txt 8983`
 is restricted by `perf_event_paranoid` settings.  
 `--all-kernel` is its counterpart option for including only kernel-mode events.
 
-* `--sync-walk` - prefer synchronous JVMTI stack walker instead of `AsyncGetCallTrace`.
-This option may improve accuracy of Java stack traces when profiling JVM runtime
-functions, e.g. `VMThread::execute`, `G1CollectedHeap::humongous_obj_allocate` etc.
-Do not use unless you are absolutely sure! When used incorrectly, this mode will crash JVM! 
+* `--cstack` - always collect C stack (i.e. native call trace) along with Java call trace.  
+  `--no-cstack` - never collect C stack, leave only Java frames.
+
+  By default, C stack is shown in cpu, itimer, wall-clock and perf-events profiles.
+Java-level events like `alloc` and `lock` collect only Java stack.
 
 * `-v`, `--version` - prints the version of profiler library. If PID is specified,
 gets the version of the library loaded into the given process.
@@ -468,8 +490,6 @@ No AllocTracer symbols found. Are JDK debug symbols installed?
 It might be needed to install the package with OpenJDK debug symbols.
 See [Allocation profiling](#allocation-profiling) for details.
 
-Note that allocation profiling is not supported on JVMs other than HotSpot, e.g. Zing.
-
 ```
 VMStructs unavailable. Unsupported JVM?
 ```
@@ -492,3 +512,10 @@ This is the OS bug, see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/184
 ```
 This message in the output means there was not enough space to store all call traces.
 Consider increasing frame buffer size with `-b` option.
+
+```
+Output file is not created
+```
+Output file is written by the target JVM process, not by the profiler script.
+If the file cannot be opened (e.g. due to lack of permissions), the error message
+is printed to `stderr` of the target process (JVM console).

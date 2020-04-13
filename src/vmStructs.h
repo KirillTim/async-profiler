@@ -24,15 +24,21 @@
 
 class VMStructs {
   protected:
+    static jfieldID _eetop;
+    static jfieldID _tid;
+    static intptr_t _env_offset;
     static int _klass_name_offset;
     static int _symbol_length_offset;
     static int _symbol_length_and_refcount_offset;
     static int _symbol_body_offset;
     static int _class_klass_offset;
     static int _thread_osthread_offset;
+    static int _thread_anchor_offset;
     static int _osthread_id_offset;
+    static int _anchor_sp_offset;
+    static int _anchor_pc_offset;
+    static int _frame_size_offset;
     static bool _has_perm_gen;
-    static jfieldID _eetop;
 
     const char* at(int offset) {
         return (const char*)this + offset;
@@ -40,6 +46,7 @@ class VMStructs {
 
   public:
     static void init(NativeCodeCache* libjvm);
+    static bool initThreadBridge();
 
     static bool available() {
         return _klass_name_offset >= 0
@@ -95,17 +102,40 @@ class java_lang_Class : VMStructs {
 
 class VMThread : VMStructs {
   public:
-    static bool available() {
-        return _eetop != NULL;
-    }
-
     static VMThread* fromJavaThread(JNIEnv* env, jthread thread) {
         return (VMThread*)(uintptr_t)env->GetLongField(thread, _eetop);
+    }
+
+    static VMThread* fromEnv(JNIEnv* env) {
+        return (VMThread*)((intptr_t)env - _env_offset);
+    }
+
+    static jlong javaThreadId(JNIEnv* env, jthread thread) {
+        return env->GetLongField(thread, _tid);
+    }
+
+    static bool hasNativeId() {
+        return _thread_osthread_offset >= 0 && _osthread_id_offset >= 0;
     }
 
     int osThreadId() {
         const char* osthread = *(const char**) at(_thread_osthread_offset);
         return *(int*)(osthread + _osthread_id_offset);
+    }
+
+    uintptr_t& lastJavaSP() {
+        return *(uintptr_t*) (at(_thread_anchor_offset) + _anchor_sp_offset);
+    }
+
+    uintptr_t& lastJavaPC() {
+        return *(uintptr_t*) (at(_thread_anchor_offset) + _anchor_pc_offset);
+    }
+};
+
+class RuntimeStub : VMStructs {
+  public:
+    int frameSize() {
+        return *(int*) at(_frame_size_offset);
     }
 };
 

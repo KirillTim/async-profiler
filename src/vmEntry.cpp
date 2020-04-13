@@ -19,8 +19,10 @@
 #include <string.h>
 #include "vmEntry.h"
 #include "arguments.h"
+#include "javaApi.h"
 #include "os.h"
 #include "profiler.h"
+#include "instrument.h"
 #include "lockTracer.h"
 
 
@@ -50,6 +52,8 @@ void VM::init(JavaVM* vm, bool attach) {
 
     jvmtiCapabilities capabilities = {0};
     capabilities.can_generate_all_class_hook_events = 1;
+    capabilities.can_retransform_classes = 1;
+    capabilities.can_retransform_any_class = 1;
     capabilities.can_get_bytecodes = 1;
     capabilities.can_get_constant_pool = 1;
     capabilities.can_get_source_file_name = 1;
@@ -64,6 +68,7 @@ void VM::init(JavaVM* vm, bool attach) {
     callbacks.VMDeath = VMDeath;
     callbacks.ClassLoad = ClassLoad;
     callbacks.ClassPrepare = ClassPrepare;
+    callbacks.ClassFileLoadHook = Instrument::ClassFileLoadHook;
     callbacks.CompiledMethodLoad = Profiler::CompiledMethodLoad;
     callbacks.CompiledMethodUnload = Profiler::CompiledMethodUnload;
     callbacks.DynamicCodeGenerated = Profiler::DynamicCodeGenerated;
@@ -82,10 +87,10 @@ void VM::init(JavaVM* vm, bool attach) {
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_DYNAMIC_CODE_GENERATED, NULL);
 
     _libjvm = getLibraryHandle("libjvm.so");
-    _libjava = getLibraryHandle("libjava.so");
     _asyncGetCallTrace = (AsyncGetCallTrace)dlsym(_libjvm, "AsyncGetCallTrace");
 
     if (attach) {
+        _libjava = getLibraryHandle("libjava.so");
         loadAllMethodIDs(_jvmti);
         _jvmti->GenerateEvents(JVMTI_EVENT_DYNAMIC_CODE_GENERATED);
         _jvmti->GenerateEvents(JVMTI_EVENT_COMPILED_METHOD_LOAD);
@@ -123,6 +128,7 @@ void VM::loadAllMethodIDs(jvmtiEnv* jvmti) {
 }
 
 void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
+    _libjava = getLibraryHandle("libjava.so");
     loadAllMethodIDs(jvmti);
     // Delayed start of profiler if agent has been loaded at VM bootstrap
     Profiler::_instance.run(_agent_args);
@@ -169,5 +175,6 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
 extern "C" JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM* vm, void* reserved) {
     VM::init(vm, true);
+    JavaAPI::registerNatives(VM::jvmti(), VM::jni());
     return JNI_VERSION_1_6;
 }

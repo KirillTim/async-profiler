@@ -1,6 +1,25 @@
 # Changelog
 
-## [1.6] 2019-09-09
+## [1.7] - 2020-03-17
+
+### Features
+ - Profile invocations of arbitrary Java methods
+ - Filter stack traces by the given name pattern
+ - Java API to filter monitored threads
+ - `--cstack`/`--no-cstack` option
+
+### Improvements
+ - Thread names and Java thread IDs in JFR output
+ - Wall clock profiler distinguishes RUNNABLE vs. SLEEPING threads
+ - Stable profiling interval in wall clock mode
+ - C++ function names as events, e.g. `-e VMThread::execute`
+ - `check` command to test event availability
+ - Allow shading of AsyncProfiler API
+ - Enable CPU profiling on WSL
+ - Enable allocation profiling on Zing
+ - Reduce the amount of `unknown_Java` samples
+
+## [1.6] - 2019-09-09
 
 ### Features
  - Pause/resume profiling
